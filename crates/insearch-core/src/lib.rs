@@ -13,6 +13,6 @@ pub mod watch;
 // Everyday API. The extension surface (extractors, splitters) stays under its
 // modules — `extract::{TextExtractor, Registry}`, `split::{UnitSplitter, ...}` —
 // so this prelude reflects what front-ends actually use.
-pub use model::{Granularity, Match, Mode, Query, SearchEvent};
-pub use scan::{search, search_collect, FileFilter, ScanOptions};
+pub use model::{CaseMode, Granularity, Match, MatchMode, Mode, Query, SearchEvent};
+pub use scan::{highlight_regex, search, search_collect, FileFilter, ScanOptions};
 pub use watch::{start as start_watch, WatchHandle};

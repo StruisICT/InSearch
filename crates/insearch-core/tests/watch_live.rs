@@ -21,10 +21,8 @@ fn watcher_reports_appended_matches() {
     let (tx, rx) = crossbeam_channel::bounded(1024);
     let current_gen = Arc::new(AtomicU64::new(1));
     let query = Query {
-        pattern: "ERROR".into(),
-        is_regex: false,
-        smart_case: true,
         granularity: Granularity::Line,
+        ..Query::literal("ERROR")
     };
 
     let _handle = start_watch(std::slice::from_ref(&dir), &query, 1, current_gen, tx).unwrap();

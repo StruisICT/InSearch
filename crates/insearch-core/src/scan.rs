@@ -22,7 +22,7 @@ use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use crate::extract::{default_registry, Source};
-use crate::model::{Granularity, Match, Query, SearchEvent};
+use crate::model::{CaseMode, Granularity, Match, MatchMode, Query, SearchEvent};
 use crate::split::{strip_eol, BlockSplitter, Unit, UnitSplitter};
 
 /// Cap block text length (in characters) held per match for display.
@@ -193,17 +193,135 @@ impl CompiledFilter {
     }
 }
 
-/// Build a grep matcher from a query. Literal queries are regex-escaped.
-pub(crate) fn build_matcher(query: &Query) -> Result<RegexMatcher, String> {
-    let pattern = if query.is_regex {
-        query.pattern.clone()
+/// A query compiled into concrete matchers: a unit matches when *every*
+/// `required` matcher matches and *no* `excluded` matcher does. `primary` (a
+/// superset — the first required matcher) is used to drive grep-searcher's line
+/// scan and to locate the matched line within a block.
+pub(crate) struct CompiledQuery {
+    required: Vec<RegexMatcher>,
+    excluded: Vec<RegexMatcher>,
+    primary: RegexMatcher,
+}
+
+impl CompiledQuery {
+    /// Does `bytes` satisfy all required matchers and no excluded matcher?
+    pub(crate) fn unit_matches(&self, bytes: &[u8]) -> bool {
+        self.required
+            .iter()
+            .all(|m| m.is_match(bytes).unwrap_or(false))
+            && !self
+                .excluded
+                .iter()
+                .any(|m| m.is_match(bytes).unwrap_or(false))
+    }
+}
+
+/// Wrap a regex source in word boundaries when whole-word matching is on.
+fn wrap_word(src: String, whole_word: bool) -> String {
+    if whole_word {
+        format!(r"\b(?:{src})\b")
     } else {
-        regex::escape(&query.pattern)
+        src
+    }
+}
+
+/// Regex source for a single literal term.
+fn literal_term(term: &str, whole_word: bool) -> String {
+    wrap_word(regex::escape(term), whole_word)
+}
+
+/// Build one matcher from an already-regex source, honouring the case policy.
+fn build_one(src: &str, case: CaseMode) -> Result<RegexMatcher, String> {
+    let mut b = RegexMatcherBuilder::new();
+    match case {
+        CaseMode::Smart => {
+            b.case_smart(true);
+        }
+        CaseMode::Sensitive => {
+            b.case_insensitive(false);
+        }
+        CaseMode::Insensitive => {
+            b.case_insensitive(true);
+        }
+    }
+    b.build(src).map_err(|e| e.to_string())
+}
+
+/// A compiled regex matching any of the query's *positive* terms, for UI match
+/// highlighting. Returns `None` for an empty or invalid query.
+pub fn highlight_regex(query: &Query) -> Option<regex::Regex> {
+    let ww = query.whole_word;
+    let mut alts: Vec<String> = Vec::new();
+    match query.mode {
+        MatchMode::Substring => alts.push(literal_term(&query.pattern, ww)),
+        MatchMode::Regex => alts.push(wrap_word(query.pattern.clone(), ww)),
+        MatchMode::AllWords | MatchMode::AnyWords => {
+            for w in query.pattern.split_whitespace() {
+                alts.push(literal_term(w, ww));
+            }
+        }
+    }
+    alts.retain(|s| !s.is_empty());
+    if alts.is_empty() {
+        return None;
+    }
+    let combined = alts.join("|");
+    let insensitive = match query.case {
+        CaseMode::Insensitive => true,
+        CaseMode::Sensitive => false,
+        CaseMode::Smart => !query.pattern.chars().any(|c| c.is_uppercase()),
     };
-    RegexMatcherBuilder::new()
-        .case_smart(query.smart_case)
-        .build(&pattern)
-        .map_err(|e| e.to_string())
+    let src = if insensitive {
+        format!("(?i){combined}")
+    } else {
+        combined
+    };
+    regex::Regex::new(&src).ok()
+}
+
+/// Compile a [`Query`] into a [`CompiledQuery`].
+pub(crate) fn build_compiled(query: &Query) -> Result<CompiledQuery, String> {
+    let ww = query.whole_word;
+    let mut required_src: Vec<String> = Vec::new();
+    match query.mode {
+        MatchMode::Substring => required_src.push(literal_term(&query.pattern, ww)),
+        MatchMode::Regex => required_src.push(wrap_word(query.pattern.clone(), ww)),
+        MatchMode::AllWords => {
+            // Each word is a separate required matcher (order-independent AND).
+            for w in query.pattern.split_whitespace() {
+                required_src.push(literal_term(w, ww));
+            }
+        }
+        MatchMode::AnyWords => {
+            let alts: Vec<String> = query
+                .pattern
+                .split_whitespace()
+                .map(|w| literal_term(w, ww))
+                .collect();
+            if !alts.is_empty() {
+                required_src.push(alts.join("|"));
+            }
+        }
+    }
+    if required_src.is_empty() {
+        return Err("empty query".into());
+    }
+
+    let required: Vec<RegexMatcher> = required_src
+        .iter()
+        .map(|s| build_one(s, query.case))
+        .collect::<Result<_, _>>()?;
+    let excluded: Vec<RegexMatcher> = query
+        .exclude
+        .split_whitespace()
+        .map(|w| build_one(&literal_term(w, ww), query.case))
+        .collect::<Result<_, _>>()?;
+    let primary = required[0].clone();
+    Ok(CompiledQuery {
+        required,
+        excluded,
+        primary,
+    })
 }
 
 /// Run a search to completion (blocking — call from a worker thread).
@@ -219,8 +337,8 @@ pub fn search(
     opts: ScanOptions,
     tx: Sender<SearchEvent>,
 ) {
-    let matcher = match build_matcher(query) {
-        Ok(m) => m,
+    let compiled = match build_compiled(query) {
+        Ok(c) => Arc::new(c),
         Err(e) => {
             let _ = tx.send(SearchEvent::Error(generation, e));
             return;
@@ -261,7 +379,7 @@ pub fn search(
 
     let walker = builder.build_parallel();
     walker.run(|| {
-        let matcher = matcher.clone();
+        let compiled = compiled.clone();
         let tx = tx.clone();
         let current_gen = current_gen.clone();
         let block_splitter = block_splitter.clone();
@@ -287,15 +405,15 @@ pub fn search(
                 // Plain text / logs: search the file in place.
                 Ok(Some(Source::Raw)) => match &block_splitter {
                     Some(bs) => {
-                        search_file_blocks(&matcher, &path, bs, generation, &current_gen, &tx)
+                        search_file_blocks(&compiled, &path, bs, generation, &current_gen, &tx)
                     }
-                    None => search_file_lines(&matcher, &path, generation, &current_gen, &tx),
+                    None => search_file_lines(&compiled, &path, generation, &current_gen, &tx),
                 },
                 // Decoded binary format: search the materialized text.
                 Ok(Some(Source::Materialized(text))) => {
                     let cancelled = match &block_splitter {
                         Some(bs) => search_text_blocks(
-                            &matcher,
+                            &compiled,
                             &path,
                             bs,
                             &text,
@@ -303,9 +421,14 @@ pub fn search(
                             &current_gen,
                             &tx,
                         ),
-                        None => {
-                            search_text_lines(&matcher, &path, &text, generation, &current_gen, &tx)
-                        }
+                        None => search_text_lines(
+                            &compiled,
+                            &path,
+                            &text,
+                            generation,
+                            &current_gen,
+                            &tx,
+                        ),
                     };
                     if cancelled {
                         WalkState::Quit
@@ -323,8 +446,10 @@ pub fn search(
 }
 
 /// Search a single file's raw bytes with grep-searcher (line mode fast path).
+/// grep-searcher scans for the `primary` matcher; the sink then verifies the
+/// full compiled query (all required, no excluded) on each candidate line.
 fn search_file_lines(
-    matcher: &RegexMatcher,
+    compiled: &CompiledQuery,
     path: &Path,
     generation: u64,
     current_gen: &Arc<AtomicU64>,
@@ -332,13 +457,14 @@ fn search_file_lines(
 ) -> WalkState {
     let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
     let sink = MatchSink {
+        compiled,
         path,
         generation,
         current_gen,
         tx,
         stop: false,
     };
-    let _ = searcher.search_path(matcher, path, sink);
+    let _ = searcher.search_path(&compiled.primary, path, sink);
     if current_gen.load(Ordering::Relaxed) != generation {
         WalkState::Quit
     } else {
@@ -350,7 +476,7 @@ fn search_file_lines(
 /// and emit one match per block that contains a matching line. Reused by the
 /// watch module for block-mode re-scans.
 pub(crate) fn search_file_blocks(
-    matcher: &RegexMatcher,
+    compiled: &CompiledQuery,
     path: &Path,
     splitter: &BlockSplitter,
     generation: u64,
@@ -373,7 +499,7 @@ pub(crate) fn search_file_blocks(
         return WalkState::Continue;
     }
     let text = String::from_utf8_lossy(&bytes);
-    if search_text_blocks(matcher, path, splitter, &text, generation, current_gen, tx) {
+    if search_text_blocks(compiled, path, splitter, &text, generation, current_gen, tx) {
         WalkState::Quit
     } else {
         WalkState::Continue
@@ -384,7 +510,7 @@ pub(crate) fn search_file_blocks(
 /// match. Returns `true` if cancelled mid-way. Shared by on-disk block search
 /// and by extractor-materialized text (pdf/xls/docx).
 pub(crate) fn search_text_blocks(
-    matcher: &RegexMatcher,
+    compiled: &CompiledQuery,
     path: &Path,
     splitter: &BlockSplitter,
     text: &str,
@@ -398,7 +524,12 @@ pub(crate) fn search_text_blocks(
             cancelled = true;
             return false;
         }
-        if let Some(matched_line) = first_matching_line(matcher, &unit) {
+        // A block matches when the whole block satisfies the query (all required
+        // terms present somewhere in it, no excluded term); the reported line is
+        // the first one containing the primary term.
+        if compiled.unit_matches(unit.text.as_bytes()) {
+            let matched_line =
+                first_matching_line(&compiled.primary, &unit).unwrap_or(unit.line_start);
             // Char-safe cap so we never split a multi-byte codepoint.
             let mut display: String = unit.text.chars().take(BLOCK_DISPLAY_CAP).collect();
             if display.len() < unit.text.len() {
@@ -426,7 +557,7 @@ pub(crate) fn search_text_blocks(
 /// if cancelled. The on-disk line path uses grep-searcher instead (see
 /// [`search_file_lines`]).
 pub(crate) fn search_text_lines(
-    matcher: &RegexMatcher,
+    compiled: &CompiledQuery,
     path: &Path,
     text: &str,
     generation: u64,
@@ -439,7 +570,7 @@ pub(crate) fn search_text_lines(
             return true;
         }
         let content = strip_eol(line);
-        if matcher.is_match(content.as_bytes()).unwrap_or(false) {
+        if compiled.unit_matches(content.as_bytes()) {
             let ln = idx as u64 + 1;
             let m = Match {
                 path: path.to_path_buf(),
@@ -474,6 +605,7 @@ fn first_matching_line(matcher: &RegexMatcher, unit: &Unit<'_>) -> Option<u64> {
 /// grep-searcher sink that turns each matching line into a `SearchEvent::Match`
 /// and applies backpressure by riding the bounded channel's blocking send.
 struct MatchSink<'a> {
+    compiled: &'a CompiledQuery,
     path: &'a Path,
     generation: u64,
     current_gen: &'a Arc<AtomicU64>,
@@ -487,6 +619,11 @@ impl<'a> Sink for MatchSink<'a> {
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         if self.stop || self.current_gen.load(Ordering::Relaxed) != self.generation {
             return Ok(false);
+        }
+        // grep-searcher matched the primary term; confirm the full query (all
+        // required, no excluded) before emitting.
+        if !self.compiled.unit_matches(mat.bytes()) {
+            return Ok(true);
         }
         let line_start = mat.line_number().unwrap_or(0);
         let byte_offset = mat.absolute_byte_offset();
@@ -568,9 +705,10 @@ mod tests {
         write(&dir, "a.log", "hello\nHELLO\nHello\n");
         let q = Query {
             pattern: "HELLO".into(),
-            is_regex: false,
-            smart_case: true,
+            mode: MatchMode::Substring,
+            case: CaseMode::Smart,
             granularity: crate::model::Granularity::Line,
+            ..Query::literal("")
         };
         let hits = search_collect(std::slice::from_ref(&dir), &q, ScanOptions::default());
         // Uppercase in query -> case-sensitive -> only the exact "HELLO".
@@ -591,10 +729,8 @@ mod tests {
              2026-01-01 00:00:03 done\n",
         );
         let q = Query {
-            pattern: "caused by".into(),
-            is_regex: false,
-            smart_case: true,
             granularity: Granularity::Block,
+            ..Query::literal("caused by")
         };
         let hits = search_collect(std::slice::from_ref(&dir), &q, ScanOptions::default());
         assert_eq!(hits.len(), 1, "hits: {hits:?}");
@@ -662,13 +798,70 @@ mod tests {
     }
 
     #[test]
+    fn all_words_requires_every_term_on_line() {
+        let dir = tmpdir();
+        write(
+            &dir,
+            "a.log",
+            "alpha and beta together\nonly alpha here\nbeta only\n",
+        );
+        let q = Query {
+            mode: MatchMode::AllWords,
+            ..Query::literal("alpha beta")
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &q, ScanOptions::default());
+        assert_eq!(hits.len(), 1, "hits: {hits:?}");
+        assert_eq!(hits[0].line_start, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn any_words_matches_either_term() {
+        let dir = tmpdir();
+        write(&dir, "a.log", "has alpha\nhas beta\nhas gamma\n");
+        let q = Query {
+            mode: MatchMode::AnyWords,
+            ..Query::literal("alpha beta")
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &q, ScanOptions::default());
+        assert_eq!(hits.len(), 2, "hits: {hits:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exclude_term_rejects_matching_lines() {
+        let dir = tmpdir();
+        write(&dir, "a.log", "error in module\nerror but ignored\n");
+        let q = Query {
+            exclude: "ignored".into(),
+            ..Query::literal("error")
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &q, ScanOptions::default());
+        assert_eq!(hits.len(), 1, "hits: {hits:?}");
+        assert_eq!(hits[0].line_start, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn whole_word_does_not_match_substrings() {
+        let dir = tmpdir();
+        write(&dir, "a.log", "cat\ncategory\nscattered\n");
+        let q = Query {
+            whole_word: true,
+            ..Query::literal("cat")
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &q, ScanOptions::default());
+        assert_eq!(hits.len(), 1, "hits: {hits:?}");
+        assert_eq!(hits[0].line_start, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn invalid_regex_reports_error() {
         let q = Query {
-            pattern: "(unclosed".into(),
-            is_regex: true,
-            smart_case: true,
-            granularity: crate::model::Granularity::Line,
+            mode: MatchMode::Regex,
+            ..Query::literal("(unclosed")
         };
-        assert!(build_matcher(&q).is_err());
+        assert!(build_compiled(&q).is_err());
     }
 }

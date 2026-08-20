@@ -17,7 +17,9 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use insearch_core::model::SearchEvent;
-use insearch_core::{FileFilter, Granularity, Match, Mode, Query, ScanOptions};
+use insearch_core::{
+    CaseMode, FileFilter, Granularity, Match, MatchMode, Mode, Query, ScanOptions,
+};
 
 /// Idle time after the last keystroke before a search fires.
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -47,10 +49,56 @@ fn parse_u64(s: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok().filter(|n| *n > 0)
 }
 
+/// Lay out `text` with the regex matches highlighted (amber background).
+fn highlight_job(ui: &egui::Ui, text: &str, re: &regex::Regex) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let normal = ui.visuals().text_color();
+    let plain = |job: &mut LayoutJob, s: &str| {
+        job.append(
+            s,
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: normal,
+                ..Default::default()
+            },
+        );
+    };
+    let mut job = LayoutJob::default();
+    let mut last = 0usize;
+    for m in re.find_iter(text) {
+        if m.start() < last {
+            continue;
+        }
+        if m.start() > last {
+            plain(&mut job, &text[last..m.start()]);
+        }
+        job.append(
+            &text[m.start()..m.end()],
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: egui::Color32::BLACK,
+                background: egui::Color32::from_rgb(255, 214, 0),
+                ..Default::default()
+            },
+        );
+        last = m.end();
+    }
+    if last < text.len() {
+        plain(&mut job, &text[last..]);
+    }
+    job
+}
+
 pub struct App {
     // Query + options
     query_text: String,
-    is_regex: bool,
+    exclude_text: String,
+    match_mode: MatchMode,
+    case: CaseMode,
+    whole_word: bool,
     granularity: Granularity,
     mode: Mode,
     respect_gitignore: bool,
@@ -79,6 +127,8 @@ pub struct App {
     results: Vec<ResultRow>,
     truncated: bool,
     error: Option<String>,
+    /// Compiled from the active query to highlight matches in result previews.
+    highlight: Option<regex::Regex>,
 
     // Debounce bookkeeping
     pending_since: Option<Instant>,
@@ -153,7 +203,10 @@ impl App {
         super::palette::apply(&cc.egui_ctx, dark);
         App {
             query_text: String::new(),
-            is_regex: false,
+            exclude_text: String::new(),
+            match_mode: MatchMode::Substring,
+            case: CaseMode::Smart,
+            whole_word: false,
             granularity: Granularity::Line,
             mode: Mode::Live,
             respect_gitignore: false,
@@ -176,6 +229,7 @@ impl App {
             results: Vec::new(),
             truncated: false,
             error: None,
+            highlight: None,
             pending_since: None,
             show_settings: false,
             settings_msg: None,
@@ -186,8 +240,10 @@ impl App {
     fn current_query(&self) -> Query {
         Query {
             pattern: self.query_text.clone(),
-            is_regex: self.is_regex,
-            smart_case: true,
+            exclude: self.exclude_text.clone(),
+            mode: self.match_mode,
+            case: self.case,
+            whole_word: self.whole_word,
             granularity: self.granularity,
         }
     }
@@ -245,6 +301,7 @@ impl App {
         self.results.clear();
         self.truncated = false;
         self.error = None;
+        self.highlight = insearch_core::highlight_regex(&query);
         self.searching = true;
         self.watching = false;
 
@@ -476,9 +533,28 @@ impl App {
         // Query row.
         ui.horizontal(|ui| {
             ui.label("Search:");
+            let hint = match self.match_mode {
+                MatchMode::AllWords => "words that must all appear…",
+                MatchMode::AnyWords => "any of these words…",
+                MatchMode::Regex => "regular expression…",
+                MatchMode::Substring => "type to search inside files…",
+            };
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.query_text)
-                    .hint_text("type to search inside files…")
+                    .hint_text(hint)
+                    .desired_width(f32::INFINITY),
+            );
+            if resp.changed() {
+                self.pending_since = Some(Instant::now());
+            }
+        });
+
+        // Exclude row.
+        ui.horizontal(|ui| {
+            ui.label("Exclude:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.exclude_text)
+                    .hint_text("space-separated words to exclude (NOT)")
                     .desired_width(f32::INFINITY),
             );
             if resp.changed() {
@@ -488,12 +564,52 @@ impl App {
 
         // Options row.
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut self.is_regex, "Regex").changed() {
-                self.pending_since = Some(Instant::now());
-            }
+            let mut changed = false;
+
+            // Match mode.
+            let mode_label = match self.match_mode {
+                MatchMode::Substring => "Substring",
+                MatchMode::Regex => "Regex",
+                MatchMode::AllWords => "All words",
+                MatchMode::AnyWords => "Any words",
+            };
+            egui::ComboBox::from_id_salt("match_mode")
+                .selected_text(mode_label)
+                .show_ui(ui, |ui| {
+                    for (m, label) in [
+                        (MatchMode::Substring, "Substring"),
+                        (MatchMode::Regex, "Regex"),
+                        (MatchMode::AllWords, "All words"),
+                        (MatchMode::AnyWords, "Any words"),
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut self.match_mode, m, label)
+                            .changed();
+                    }
+                });
+
+            // Case sensitivity.
+            let case_label = match self.case {
+                CaseMode::Smart => "Smart case",
+                CaseMode::Sensitive => "Case sensitive",
+                CaseMode::Insensitive => "Ignore case",
+            };
+            egui::ComboBox::from_id_salt("case_mode")
+                .selected_text(case_label)
+                .show_ui(ui, |ui| {
+                    for (c, label) in [
+                        (CaseMode::Smart, "Smart case"),
+                        (CaseMode::Sensitive, "Case sensitive"),
+                        (CaseMode::Insensitive, "Ignore case"),
+                    ] {
+                        changed |= ui.selectable_value(&mut self.case, c, label).changed();
+                    }
+                });
+
+            changed |= ui.checkbox(&mut self.whole_word, "Whole word").changed();
+
             ui.separator();
             ui.label("Granularity:");
-            let mut changed = false;
             changed |= ui
                 .selectable_value(&mut self.granularity, Granularity::Line, "Line")
                 .on_hover_text("One result per matching line")
@@ -663,8 +779,14 @@ impl App {
                             resp.on_hover_text(hover);
                         }
                     });
-                    row.col(|ui| {
-                        ui.label(&r.preview).on_hover_text(&r.full_text);
+                    row.col(|ui| match &self.highlight {
+                        Some(re) => {
+                            let job = highlight_job(ui, &r.preview, re);
+                            ui.label(job).on_hover_text(&r.full_text);
+                        }
+                        None => {
+                            ui.label(&r.preview).on_hover_text(&r.full_text);
+                        }
                     });
                 });
             });

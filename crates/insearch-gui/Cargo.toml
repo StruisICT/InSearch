@@ -23,6 +23,7 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui_extras = "0.36"
 rfd = "0.17"
+regex = "1.13"
 
 # Windows-only: registry access for the Explorer context-menu integration.
 [target.'cfg(windows)'.dependencies]

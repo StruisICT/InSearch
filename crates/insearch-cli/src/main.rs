@@ -41,10 +41,12 @@ fn main() -> ExitCode {
     }
 
     let query = Query {
-        pattern,
-        is_regex,
-        smart_case: true,
-        granularity: insearch_core::Granularity::Line,
+        mode: if is_regex {
+            insearch_core::MatchMode::Regex
+        } else {
+            insearch_core::MatchMode::Substring
+        },
+        ..Query::literal(pattern)
     };
 
     let hits = search_collect(&roots, &query, opts);

@@ -20,26 +20,54 @@ pub enum Mode {
     Watch,
 }
 
+/// How the query `pattern` is interpreted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MatchMode {
+    /// Literal substring.
+    #[default]
+    Substring,
+    /// Regular expression.
+    Regex,
+    /// Space-separated words that must *all* appear in the unit (order-free).
+    AllWords,
+    /// Space-separated words, *any* of which may appear.
+    AnyWords,
+}
+
+/// Case-sensitivity policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CaseMode {
+    /// ripgrep-style: insensitive unless the pattern has an uppercase letter.
+    #[default]
+    Smart,
+    Sensitive,
+    Insensitive,
+}
+
 /// A user query plus its matching options.
 #[derive(Clone, Debug)]
 pub struct Query {
-    /// The raw pattern. Treated as a literal substring unless `is_regex`.
+    /// The raw pattern, interpreted per `mode`.
     pub pattern: String,
-    /// Interpret `pattern` as a regular expression.
-    pub is_regex: bool,
-    /// ripgrep-style smart case: case-insensitive unless the pattern has an
-    /// uppercase letter.
-    pub smart_case: bool,
+    /// Space-separated terms that must NOT appear (exclusion / NOT).
+    pub exclude: String,
+    pub mode: MatchMode,
+    pub case: CaseMode,
+    /// Match only whole words (wrap terms in `\b`).
+    pub whole_word: bool,
     /// Report matches per-line or per-block.
     pub granularity: Granularity,
 }
 
 impl Query {
+    /// A plain smart-case substring query (used by the CLI/tests as a default).
     pub fn literal(pattern: impl Into<String>) -> Self {
         Query {
             pattern: pattern.into(),
-            is_regex: false,
-            smart_case: true,
+            exclude: String::new(),
+            mode: MatchMode::Substring,
+            case: CaseMode::Smart,
+            whole_word: false,
             granularity: Granularity::Line,
         }
     }

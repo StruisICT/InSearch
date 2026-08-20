@@ -1395,6 +1395,7 @@ dependencies = [
  "egui_extras",
  "embed-resource",
  "insearch-core",
+ "regex",
  "rfd",
  "winreg 0.56.0",
 ]

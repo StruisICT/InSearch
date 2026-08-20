@@ -24,8 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
-use grep_matcher::Matcher as _;
-use grep_regex::RegexMatcher;
 use notify_debouncer_full::notify::event::ModifyKind;
 use notify_debouncer_full::notify::{self, EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
@@ -33,7 +31,7 @@ use notify_debouncer_full::{
 };
 
 use crate::model::{Granularity, Match, Query, SearchEvent};
-use crate::scan::{build_matcher, search_file_blocks};
+use crate::scan::{build_compiled, search_file_blocks, CompiledQuery};
 use crate::split::{strip_eol, BlockSplitter};
 
 /// Debounce window for coalescing bursts of filesystem events.
@@ -108,7 +106,7 @@ struct FileState {
 
 /// Processes debounced events into incremental match updates.
 struct Tailer {
-    matcher: RegexMatcher,
+    compiled: CompiledQuery,
     block: Option<BlockSplitter>,
     generation: u64,
     current_gen: Arc<AtomicU64>,
@@ -123,14 +121,14 @@ impl Tailer {
         current_gen: Arc<AtomicU64>,
         tx: Sender<SearchEvent>,
     ) -> Option<Self> {
-        let matcher = build_matcher(&query).ok()?;
+        let compiled = build_compiled(&query).ok()?;
         let block = if query.granularity == Granularity::Block {
             Some(BlockSplitter::default())
         } else {
             None
         };
         Some(Tailer {
-            matcher,
+            compiled,
             block,
             generation,
             current_gen,
@@ -200,7 +198,7 @@ impl Tailer {
         }
         if let Some(bs) = &self.block {
             let _ = search_file_blocks(
-                &self.matcher,
+                &self.compiled,
                 path,
                 bs,
                 self.generation,
@@ -279,7 +277,7 @@ impl Tailer {
         for line in text.split_inclusive('\n') {
             local_line += 1;
             let content = strip_eol(line);
-            if self.matcher.is_match(content.as_bytes()).unwrap_or(false) {
+            if self.compiled.unit_matches(content.as_bytes()) {
                 let m = Match {
                     path: path.to_path_buf(),
                     line_start: base_line + local_line,
@@ -305,7 +303,6 @@ impl Tailer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Granularity;
     use std::io::Write;
 
     fn tmp_file(name: &str) -> PathBuf {
@@ -328,12 +325,7 @@ mod tests {
     }
 
     fn line_query() -> Query {
-        Query {
-            pattern: "ERROR".into(),
-            is_regex: false,
-            smart_case: true,
-            granularity: Granularity::Line,
-        }
+        Query::literal("ERROR")
     }
 
     fn drain(rx: &crossbeam_channel::Receiver<SearchEvent>) -> Vec<SearchEvent> {
