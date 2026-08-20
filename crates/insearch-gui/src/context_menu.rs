@@ -12,6 +12,9 @@
 pub use imp::{register, status, unregister};
 
 /// Whether the integration is installed, and whether it still points here.
+/// On non-Windows the stub only ever yields `NotRegistered`, so the other
+/// variants would look dead there — they're live on Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     /// No context-menu entry installed.
