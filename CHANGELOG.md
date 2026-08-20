@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/StruisICT/InSearch/compare/v0.1.0...v0.1.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* correct stale CI note in AGENTS.md (releases are automated) ([9ac0fe3](https://github.com/StruisICT/InSearch/commit/9ac0fe358bee408023a96b11cade12b010d33826))
+
 ## 0.1.0 (2026-08-20)
 
 
