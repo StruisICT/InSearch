@@ -158,6 +158,8 @@ pub struct App {
 
     // Debounce bookkeeping
     pending_since: Option<Instant>,
+    /// Request keyboard focus for the search box on the next frame.
+    focus_search: bool,
 
     // Settings window (Explorer context-menu integration)
     show_settings: bool,
@@ -227,7 +229,11 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_root: Option<PathBuf>) -> Self {
         let dark = true;
         super::palette::apply(&cc.egui_ctx, dark);
+        // Launched with a folder (e.g. Explorer "Search with InSearch")? Put the
+        // cursor straight in the search box so the user can just type.
+        let focus_search = initial_root.is_some();
         App {
+            focus_search,
             query_text: String::new(),
             exclude_text: String::new(),
             match_mode: MatchMode::Substring,
@@ -723,6 +729,11 @@ impl App {
             );
             if resp.changed() {
                 self.pending_since = Some(Instant::now());
+            }
+            // Focus the search box once, when launched with a folder.
+            if self.focus_search {
+                resp.request_focus();
+                self.focus_search = false;
             }
         });
 
