@@ -41,22 +41,22 @@ jobs:
       - run: cargo test --workspace
 
       - name: Build release
-        run: cargo build --release -p fetchy-gui -p fetchy-cli
+        run: cargo build --release -p insearch-gui -p insearch-cli
 
       - name: Smoke-test CLI
         run: |
           printf 'hello ERROR world\nnothing here\n' > sample.log
-          ./target/release/fetchy-cli ERROR . | grep -q ERROR
+          ./target/release/insearch-cli ERROR . | grep -q ERROR
 
       - name: Package tarball
         run: |
           mkdir -p dist
-          tar -C target/release -czf "dist/InspectorFetchy-linux-x86_64.tar.gz" \
-            fetchy-gui fetchy-cli
+          tar -C target/release -czf "dist/InSearch-linux-x86_64.tar.gz" \
+            insearch-gui insearch-cli
 
       - uses: actions/upload-artifact@v4
         with:
-          name: inspector-fetchy-linux
+          name: insearch-linux
           path: dist/*.tar.gz
 
       - name: Attach to release

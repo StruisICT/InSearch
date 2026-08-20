@@ -1,8 +1,8 @@
-//! Inspector Fetchy — egui desktop front-end.
+//! InSearch — egui desktop front-end.
 //!
 //! Launch with an optional path argument (used by the Windows Explorer
-//! "Search with Inspector Fetchy" entry, added in a later phase) to prefill the
-//! search root: `fetchy-gui "C:\logs"`.
+//! "Search with InSearch" entry, added in a later phase) to prefill the
+//! search root: `insearch-gui "C:\logs"`.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
@@ -24,12 +24,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1080.0, 700.0])
             .with_min_inner_size([720.0, 460.0])
-            .with_title("Inspector Fetchy"),
+            .with_title("InSearch"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Inspector Fetchy",
+        "InSearch",
         native_options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, initial_root.clone())))),
     )

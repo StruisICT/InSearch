@@ -1,6 +1,4 @@
-# Inspector Fetchy
-
-> Working title — will change later.
+# InSearch
 
 A real-time, content-aware search tool. It finds files on disk **and** searches
 *inside* them, streaming matches as it goes. Built for logs and documents: search
@@ -17,7 +15,7 @@ Working. Core search, block mode, watch mode, and binary extractors are in.
 - [x] Block / timestamp extraction (per-block matches)
 - [x] Watch-folders mode (log-tailing)
 - [x] Binary extractors: xls / xlsx / ods, docx, pdf (behind cargo features)
-- [x] Windows Explorer "Search with Inspector Fetchy" context menu (opt-in via Settings)
+- [x] Windows Explorer "Search with InSearch" context menu (opt-in via Settings)
 - [ ] CI / packaging
 
 Enable the Explorer right-click entry from **⚙ Settings → Explorer integration**
@@ -25,7 +23,7 @@ Enable the Explorer right-click entry from **⚙ Settings → Explorer integrati
 
 ### Cargo features
 
-Binary-format support is opt-in on `fetchy-core` (the GUI and CLI enable
+Binary-format support is opt-in on `insearch-core` (the GUI and CLI enable
 `all-formats`): `xls` (calamine), `docx` (zip + quick-xml), `pdf` (pdf-extract),
 and `all-formats` for all three.
 
@@ -33,22 +31,22 @@ and `all-formats` for all three.
 
 ```sh
 # GUI
-cargo run -p fetchy-gui              # optional: ... -- "C:\path\to\search"
+cargo run -p insearch-gui              # optional: ... -- "C:\path\to\search"
 
 # CLI
-cargo run -p fetchy-cli -- <pattern> <root> [more roots...] [--regex] [--gitignore]
+cargo run -p insearch-cli -- <pattern> <root> [more roots...] [--regex] [--gitignore]
 
 # Tests
-cargo test -p fetchy-core
+cargo test -p insearch-core
 ```
 
 ## Workspace layout
 
 | Crate         | Role                                                                 |
 |---------------|---------------------------------------------------------------------|
-| `fetchy-core` | Headless engine: walk (`ignore`), match (`grep-regex`), extract, split |
-| `fetchy-gui`  | egui/eframe desktop front-end (glow backend)                        |
-| `fetchy-cli`  | Command-line harness (also the fast test surface)                   |
+| `insearch-core` | Headless engine: walk (`ignore`), match (`grep-regex`), extract, split |
+| `insearch-gui`  | egui/eframe desktop front-end (glow backend)                        |
+| `insearch-cli`  | Command-line harness (also the fast test surface)                   |
 
 See [`AGENTS.md`](AGENTS.md) for architecture and conventions.
 

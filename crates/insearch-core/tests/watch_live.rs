@@ -1,19 +1,19 @@
 //! Live end-to-end check of the real `notify` watch path. Ignored by default
 //! (timing-dependent); run explicitly with:
-//!   cargo test -p fetchy-core --test watch_live -- --ignored
+//!   cargo test -p insearch-core --test watch_live -- --ignored
 
 use std::io::Write;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fetchy_core::model::SearchEvent;
-use fetchy_core::{start_watch, Granularity, Query};
+use insearch_core::model::SearchEvent;
+use insearch_core::{start_watch, Granularity, Query};
 
 #[test]
 #[ignore = "timing-dependent; run with --ignored"]
 fn watcher_reports_appended_matches() {
-    let dir = std::env::temp_dir().join(format!("fetchy-live-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("insearch-live-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("live.log");
     std::fs::write(&path, "2026-01-01 00:00:00 INFO boot\n").unwrap();

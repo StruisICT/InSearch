@@ -1,18 +1,18 @@
 [package]
-name = "fetchy-gui"
+name = "insearch-gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
-description = "Inspector Fetchy — egui desktop front-end."
+description = "InSearch — egui desktop front-end."
 
 [[bin]]
-name = "fetchy-gui"
+name = "insearch-gui"
 path = "src/main.rs"
 
 [dependencies]
-fetchy-core = { path = "../fetchy-core", features = ["all-formats"] }
+insearch-core = { path = "../insearch-core", features = ["all-formats"] }
 crossbeam-channel.workspace = true
 # glow backend only (no wgpu/DirectX) — smaller binary, faster link, Linux-ready.
 eframe = { version = "0.36", default-features = false, features = [

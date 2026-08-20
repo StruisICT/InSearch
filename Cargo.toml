@@ -1,10 +1,10 @@
-# Inspector Fetchy — cargo workspace
-# A headless, testable core (`fetchy-core`) drives both the egui GUI
-# (`fetchy-gui`) and a CLI harness (`fetchy-cli`). Heavy/native extractor
+# InSearch — cargo workspace
+# A headless, testable core (`insearch-core`) drives both the egui GUI
+# (`insearch-gui`) and a CLI harness (`insearch-cli`). Heavy/native extractor
 # deps and OS-specific code stay out of the GUI build.
 [workspace]
 resolver = "2"
-members = ["crates/fetchy-core", "crates/fetchy-cli", "crates/fetchy-gui"]
+members = ["crates/insearch-core", "crates/insearch-cli", "crates/insearch-gui"]
 
 [workspace.package]
 version = "0.1.0"

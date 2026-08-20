@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "inspector-fetchy",
+      "package-name": "insearch",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false
     }

@@ -1,4 +1,4 @@
-//! Inspector Fetchy — content-aware file search engine (headless core).
+//! InSearch — content-aware file search engine (headless core).
 //!
 //! Pipeline: [`scan`] walks roots and streams matches; [`extract`] decides how a
 //! file becomes text (raw vs. decoded); [`split`] divides text into line/block

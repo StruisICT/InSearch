@@ -373,7 +373,7 @@ mod tests {
     fn tmpdir() -> PathBuf {
         // A unique-enough temp dir without external crates: PID + address.
         let base = std::env::temp_dir();
-        let uniq = format!("fetchy-test-{}-{:p}", std::process::id(), &base);
+        let uniq = format!("insearch-test-{}-{:p}", std::process::id(), &base);
         let dir = base.join(uniq);
         std::fs::create_dir_all(&dir).unwrap();
         dir

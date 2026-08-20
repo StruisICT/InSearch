@@ -1,0 +1,15 @@
+[package]
+name = "insearch-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Command-line harness for the InSearch search engine."
+
+[[bin]]
+name = "insearch-cli"
+path = "src/main.rs"
+
+[dependencies]
+insearch-core = { path = "../insearch-core", features = ["all-formats"] }

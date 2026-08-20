@@ -311,7 +311,7 @@ mod tests {
 
     fn tmp_file(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fetchy-watch-{}-{}",
+            "insearch-watch-{}-{}",
             std::process::id(),
             name.replace(['/', '\\', '.'], "_")
         ));

@@ -16,8 +16,8 @@ use crossbeam_channel::Receiver;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
-use fetchy_core::model::SearchEvent;
-use fetchy_core::{Granularity, Match, Mode, Query, ScanOptions};
+use insearch_core::model::SearchEvent;
+use insearch_core::{Granularity, Match, Mode, Query, ScanOptions};
 
 /// Idle time after the last keystroke before a search fires.
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -46,7 +46,7 @@ pub struct App {
     rx: Option<Receiver<SearchEvent>>,
     searching: bool,
     watching: bool,
-    watch_handle: Option<fetchy_core::WatchHandle>,
+    watch_handle: Option<insearch_core::WatchHandle>,
     results: Vec<Match>,
     truncated: bool,
     error: Option<String>,
@@ -150,13 +150,13 @@ impl App {
             let query = query.clone();
             let gen_counter = gen_counter.clone();
             std::thread::spawn(move || {
-                fetchy_core::search(&roots, &query, g, gen_counter, opts, tx);
+                insearch_core::search(&roots, &query, g, gen_counter, opts, tx);
             });
         }
 
         // Watch mode: stream incremental updates on the same channel.
         if self.mode == Mode::Watch {
-            match fetchy_core::start_watch(&roots, &query, g, gen_counter, tx) {
+            match insearch_core::start_watch(&roots, &query, g, gen_counter, tx) {
                 Ok(handle) => {
                     self.watch_handle = Some(handle);
                     self.watching = true;
@@ -218,7 +218,7 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Inspector Fetchy");
+            ui.heading("InSearch");
             ui.separator();
             if ui
                 .selectable_label(self.mode == Mode::Live, "Live")
@@ -351,7 +351,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.heading("Explorer integration");
                 ui.label(
-                    "Add a “Search with Inspector Fetchy” entry to the Windows \
+                    "Add a “Search with InSearch” entry to the Windows \
                      right-click menu for files and folders.",
                 );
                 ui.add_space(6.0);

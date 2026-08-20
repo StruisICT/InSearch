@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn docx_roundtrip_extract_and_scan() {
         use std::io::Write as _;
-        let dir = std::env::temp_dir().join(format!("fetchy-docx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("insearch-docx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("memo.docx");
 
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn xlsx_roundtrip_extract_and_scan() {
         use std::io::Write as _;
-        let dir = std::env::temp_dir().join(format!("fetchy-xlsx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("insearch-xlsx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("book.xlsx");
 

@@ -1,8 +1,8 @@
-# Inspector Fetchy — developer guide
+# InSearch — developer guide
 
-Working title. A real-time, content-aware file search tool: find files on disk
-and search inside them, streaming matches per-line or per-timestamp-block.
-Rust + egui, Windows-first, Linux-portable.
+A real-time, content-aware file search tool: find files on disk and search
+inside them, streaming matches per-line or per-timestamp-block. Rust + egui,
+Windows-first, Linux-portable.
 
 ## Architecture
 
@@ -11,16 +11,16 @@ display, and heavy/native extractor deps stay out of the GUI build.
 
 ```
 crates/
-  fetchy-core/   # engine — no GUI, no OS-specific code
+  insearch-core/   # engine — no GUI, no OS-specific code
     model.rs     # Query, Match, SearchEvent, Granularity, Mode
     extract.rs   # TextExtractor trait + Registry (Raw vs Materialized text)
     split.rs     # UnitSplitter trait; LineSplitter now, BlockSplitter (Phase 2)
     scan.rs      # ignore::WalkParallel + grep-regex/grep-searcher, streaming
-  fetchy-gui/    # eframe/egui front-end (glow backend only)
+  insearch-gui/    # eframe/egui front-end (glow backend only)
     main.rs      # launch + argv path prefill
     app.rs       # state, debounce, worker plumbing, results table
     palette.rs   # light/dark theming
-  fetchy-cli/    # headless harness + fast test surface
+  insearch-cli/    # headless harness + fast test surface
 ```
 
 ### The two-layer extractor design
@@ -51,15 +51,15 @@ plain-text fast path additionally uses `grep-searcher`'s `Searcher`.
 
 - Keep the tree `cargo fmt`-clean and `cargo clippy --all-targets -- -D warnings`-clean.
 - Conventional Commits (feat/fix/docs/refactor/perf/test/build/ci/chore). SemVer, pre-1.0.
-- Portable code in `fetchy-core`; OS-specific code behind `#[cfg(...)]` (context
-  menu / registry lands in a `fetchy-platform` module in Phase 5).
+- Portable code in `insearch-core`; OS-specific code behind `#[cfg(...)]` (context
+  menu / registry lands in a `insearch-platform` module in Phase 5).
 - `eframe` with the **glow** backend only (no wgpu). Don't hard-pin the patch
   version (`0.36`, not `=0.36.1`).
 - Don't commit build artifacts (`/target` is gitignored).
 
 ## Binary formats (feature-gated)
 
-`fetchy-core` features `xls` (calamine), `docx` (zip + quick-xml), `pdf`
+`insearch-core` features `xls` (calamine), `docx` (zip + quick-xml), `pdf`
 (pdf-extract), and `all-formats`. `extract::default_registry()` registers
 whichever are compiled in; the scan closure resolves an extractor per file and
 searches `Source::Materialized` text through the same line/block emitters. The
@@ -67,10 +67,10 @@ GUI and CLI enable `all-formats`; core's default build stays lean.
 
 ## Windows integration
 
-- `crates/fetchy-gui/src/context_menu.rs` — HKCU register/unregister of the
-  Explorer "Search with Inspector Fetchy" verbs (`winreg`), driven only by the
+- `crates/insearch-gui/src/context_menu.rs` — HKCU register/unregister of the
+  Explorer "Search with InSearch" verbs (`winreg`), driven only by the
   in-app Settings panel. Non-Windows stub returns Unsupported.
-- `crates/fetchy-gui/build.rs` + `app.rc` + `app.manifest` — embed the Windows
+- `crates/insearch-gui/build.rs` + `app.rc` + `app.manifest` — embed the Windows
   manifest (PerMonitorV2 DPI, common controls v6, Win10/11 supportedOS) via
   `embed-resource`. Drop an `app.ico` + `ICON` line in `app.rc` to add an icon.
 

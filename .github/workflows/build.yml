@@ -38,24 +38,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release
-        run: cargo build --release -p fetchy-gui -p fetchy-cli
+        run: cargo build --release -p insearch-gui -p insearch-cli
 
       - name: Smoke-test CLI
         shell: bash
         run: |
           printf 'hello ERROR world\nnothing here\n' > sample.log
-          ./target/release/fetchy-cli.exe ERROR . | grep -q ERROR
+          ./target/release/insearch-cli.exe ERROR . | grep -q ERROR
 
       - name: Stage artifacts
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/fetchy-gui.exe "dist/InspectorFetchy.exe"
-          cp target/release/fetchy-cli.exe "dist/fetchy-cli.exe"
+          cp target/release/insearch-gui.exe "dist/InSearch.exe"
+          cp target/release/insearch-cli.exe "dist/insearch-cli.exe"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: inspector-fetchy-windows
+          name: insearch-windows
           path: dist/*.exe
 
       - name: Attach to release

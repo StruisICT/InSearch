@@ -1,4 +1,4 @@
-//! Windows Explorer "Search with Inspector Fetchy" context-menu integration.
+//! Windows Explorer "Search with InSearch" context-menu integration.
 //!
 //! Registration lives entirely under `HKCU\Software\Classes` — no admin rights,
 //! no machine-wide changes. Three verbs are installed so the entry appears when
@@ -31,15 +31,15 @@ mod imp {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
-    const LABEL: &str = "Search with Inspector Fetchy";
+    const LABEL: &str = "Search with InSearch";
 
     /// (verb key path under HKCU, argument placeholder for the command).
     /// `%1` = the selected file/folder; `%V` = the open folder's background.
     const VERBS: [(&str, &str); 3] = [
-        (r"Software\Classes\*\shell\InspectorFetchy", "%1"),
-        (r"Software\Classes\Directory\shell\InspectorFetchy", "%1"),
+        (r"Software\Classes\*\shell\InSearch", "%1"),
+        (r"Software\Classes\Directory\shell\InSearch", "%1"),
         (
-            r"Software\Classes\Directory\Background\shell\InspectorFetchy",
+            r"Software\Classes\Directory\Background\shell\InSearch",
             "%V",
         ),
     ];
