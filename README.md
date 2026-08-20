@@ -9,14 +9,29 @@ Rust + [egui](https://github.com/emilk/egui). Windows-first, Linux-portable.
 
 ## Status
 
-Working. Core search, block mode, watch mode, and binary extractors are in.
+Working, and reasonably featureful.
 
-- [x] Streaming live search-as-you-type (line mode) over chosen folders
-- [x] Block / timestamp extraction (per-block matches)
+**Search**
+- [x] Streaming live search-as-you-type over chosen folders
+- [x] Line mode and timestamp-to-timestamp **block** mode
 - [x] Watch-folders mode (log-tailing)
+- [x] Query power: substring / regex / **all words** (AND) / **any words** (OR),
+      an **exclude** field (NOT), whole-word, and case modes (smart/sensitive/ignore)
+- [x] Match highlighting in results
+
+**Files & formats**
 - [x] Binary extractors: xls / xlsx / ods, docx, pdf (behind cargo features)
-- [x] Windows Explorer "Search with InSearch" context menu (opt-in via Settings)
-- [ ] CI / packaging
+- [x] File filters: name glob/regex, extension include/exclude, size, modified-within-N-days
+
+**Results & session**
+- [x] Double-click to open · right-click to reveal / copy path / copy text
+- [x] Export results to CSV / JSON / plain text
+- [x] In-place "filter results" box
+- [x] Recent queries + saved searches (persisted); live progress (files scanned, elapsed)
+
+**Integration**
+- [x] Windows Explorer "Search with InSearch" context menu (opt-in via ⚙ Settings)
+- [x] CI (Windows + Linux build, release-please)
 
 Enable the Explorer right-click entry from **⚙ Settings → Explorer integration**
 (installs under `HKCU`, no admin required; removable from the same panel).
