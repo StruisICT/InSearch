@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
@@ -57,6 +57,21 @@ pub struct App {
     // Settings window (Explorer context-menu integration)
     show_settings: bool,
     settings_msg: Option<String>,
+
+    // Watch mode: the watcher is started only after the initial full scan
+    // finishes (on `Done`), so its first-seen `Clear` can't race the scan's
+    // matches and duplicate rows.
+    pending_watch: Option<PendingWatch>,
+}
+
+/// Captured parameters for a watcher whose start is deferred until the initial
+/// scan for the same generation completes.
+struct PendingWatch {
+    generation: u64,
+    roots: Vec<PathBuf>,
+    query: Query,
+    gen_counter: Arc<AtomicU64>,
+    tx: Sender<SearchEvent>,
 }
 
 impl App {
@@ -83,6 +98,7 @@ impl App {
             pending_since: None,
             show_settings: false,
             settings_msg: None,
+            pending_watch: None,
         }
     }
 
@@ -108,6 +124,7 @@ impl App {
         self.searching = false;
         self.watching = false;
         self.watch_handle = None; // drop stops the OS watcher + worker
+        self.pending_watch = None;
         self.rx = None;
     }
 
@@ -118,6 +135,7 @@ impl App {
         let query = self.current_query();
         self.pending_since = None;
         self.watch_handle = None; // stop any existing watcher before restarting
+        self.pending_watch = None;
 
         // Nothing to search: clear and bail.
         if self.roots.is_empty() || self.query_text.trim().len() < MIN_QUERY_LEN {
@@ -154,15 +172,36 @@ impl App {
             });
         }
 
-        // Watch mode: stream incremental updates on the same channel.
+        // Watch mode: defer starting the watcher until the initial scan sends
+        // `Done` (see `drain_results`), so the tailer's first-seen `Clear`
+        // always post-dates the scan's matches. `tx` here keeps the channel's
+        // sender alive until then.
         if self.mode == Mode::Watch {
-            match insearch_core::start_watch(&roots, &query, g, gen_counter, tx) {
-                Ok(handle) => {
-                    self.watch_handle = Some(handle);
-                    self.watching = true;
-                }
-                Err(e) => self.error = Some(format!("watch: {e}")),
+            self.pending_watch = Some(PendingWatch {
+                generation: g,
+                roots,
+                query,
+                gen_counter,
+                tx,
+            });
+        }
+    }
+
+    /// Start the deferred watcher once its generation's scan has completed.
+    fn start_pending_watch(&mut self) {
+        let Some(pw) = self.pending_watch.take() else {
+            return;
+        };
+        if pw.generation != self.active_gen {
+            return; // superseded before the scan finished
+        }
+        match insearch_core::start_watch(&pw.roots, &pw.query, pw.generation, pw.gen_counter, pw.tx)
+        {
+            Ok(handle) => {
+                self.watch_handle = Some(handle);
+                self.watching = true;
             }
+            Err(e) => self.error = Some(format!("watch: {e}")),
         }
     }
 
@@ -195,6 +234,8 @@ impl App {
                 SearchEvent::Done(g) => {
                     if g == self.active_gen {
                         self.searching = false;
+                        // Initial scan finished — safe to begin watching now.
+                        self.start_pending_watch();
                     }
                 }
                 SearchEvent::Error(g, e) => {

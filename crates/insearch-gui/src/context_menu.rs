@@ -28,6 +28,7 @@ pub enum Status {
 mod imp {
     pub use super::Status;
     use std::io;
+    use std::path::{Path, PathBuf};
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
@@ -78,6 +79,7 @@ mod imp {
             Ok(e) => e,
             Err(_) => return Status::Error,
         };
+        let current = canonical(Path::new(&exe));
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let mut present = 0;
         let mut stale = false;
@@ -85,7 +87,7 @@ mod imp {
             if let Ok(command) = hkcu.open_subkey(format!(r"{base}\command")) {
                 present += 1;
                 let value: String = command.get_value("").unwrap_or_default();
-                if !value.contains(&exe) {
+                if !command_targets(&value, &current) {
                     stale = true;
                 }
             }
@@ -96,6 +98,22 @@ mod imp {
             Status::Stale
         } else {
             Status::Registered
+        }
+    }
+
+    /// Canonicalize a path, falling back to the input if it can't be resolved
+    /// (e.g. the target no longer exists).
+    fn canonical(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
+    /// Does a `"<exe>" "<arg>"` command string point at `current`? The exe is the
+    /// first double-quoted token; both sides are compared canonically so a
+    /// moved/renamed executable is detected as stale.
+    fn command_targets(command: &str, current: &Path) -> bool {
+        match command.split('"').nth(1) {
+            Some(exe) => canonical(Path::new(exe)) == *current,
+            None => false,
         }
     }
 }
