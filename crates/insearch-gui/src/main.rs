@@ -8,6 +8,7 @@
 mod app;
 mod context_menu;
 mod palette;
+mod reveal;
 
 use std::path::PathBuf;
 

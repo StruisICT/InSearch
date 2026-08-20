@@ -49,6 +49,19 @@ fn parse_u64(s: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok().filter(|n| *n > 0)
 }
 
+/// Export file formats for the results list.
+#[derive(Clone, Copy)]
+enum ExportFormat {
+    Csv,
+    Json,
+    Text,
+}
+
+/// Quote a CSV field, doubling any embedded quotes (RFC 4180).
+fn csv_field(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
 /// Lay out `text` with the regex matches highlighted (amber background).
 fn highlight_job(ui: &egui::Ui, text: &str, re: &regex::Regex) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
@@ -129,6 +142,10 @@ pub struct App {
     error: Option<String>,
     /// Compiled from the active query to highlight matches in result previews.
     highlight: Option<regex::Regex>,
+    /// In-place substring filter over the current result set (name/preview).
+    result_filter: String,
+    /// Transient message shown in the status bar (e.g. after an export).
+    status_notice: Option<String>,
 
     // Debounce bookkeeping
     pending_since: Option<Instant>,
@@ -230,6 +247,8 @@ impl App {
             truncated: false,
             error: None,
             highlight: None,
+            result_filter: String::new(),
+            status_notice: None,
             pending_since: None,
             show_settings: false,
             settings_msg: None,
@@ -301,6 +320,7 @@ impl App {
         self.results.clear();
         self.truncated = false;
         self.error = None;
+        self.status_notice = None;
         self.highlight = insearch_core::highlight_regex(&query);
         self.searching = true;
         self.watching = false;
@@ -676,7 +696,12 @@ impl App {
         } else {
             ""
         };
-        format!("{base}{more}{state}")
+        let notice = self
+            .status_notice
+            .as_ref()
+            .map(|n| format!("   |   {n}"))
+            .unwrap_or_default();
+        format!("{base}{more}{state}{notice}")
     }
 
     /// Settings window: the Windows Explorer right-click integration toggle.
@@ -748,11 +773,133 @@ impl App {
         self.show_settings = open;
     }
 
+    /// Toolbar above the results: in-place filter box + export menu.
+    fn results_toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut export: Option<ExportFormat> = None;
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            ui.label("Filter results:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.result_filter)
+                    .hint_text("narrow the current list…")
+                    .desired_width(220.0),
+            );
+            if !self.result_filter.is_empty() && ui.small_button("✖").clicked() {
+                clear = true;
+            }
+            ui.separator();
+            ui.menu_button("Export ▾", |ui| {
+                if ui.button("CSV").clicked() {
+                    export = Some(ExportFormat::Csv);
+                    ui.close();
+                }
+                if ui.button("JSON").clicked() {
+                    export = Some(ExportFormat::Json);
+                    ui.close();
+                }
+                if ui.button("Plain text").clicked() {
+                    export = Some(ExportFormat::Text);
+                    ui.close();
+                }
+            });
+        });
+        if clear {
+            self.result_filter.clear();
+        }
+        if let Some(fmt) = export {
+            self.export_results(fmt);
+        }
+    }
+
+    /// Write the currently-visible results to a user-chosen file.
+    fn export_results(&mut self, fmt: ExportFormat) {
+        let (ext, default_name) = match fmt {
+            ExportFormat::Csv => ("csv", "insearch-results.csv"),
+            ExportFormat::Json => ("json", "insearch-results.json"),
+            ExportFormat::Text => ("txt", "insearch-results.txt"),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(default_name)
+            .add_filter(ext, &[ext])
+            .save_file()
+        else {
+            return;
+        };
+
+        let rows: Vec<&ResultRow> = self
+            .visible_indices()
+            .iter()
+            .map(|i| &self.results[*i])
+            .collect();
+        let content = match fmt {
+            ExportFormat::Csv => {
+                let mut s = String::from("path,line,text\n");
+                for r in &rows {
+                    s.push_str(&format!(
+                        "{},{},{}\n",
+                        csv_field(&r.path_display),
+                        csv_field(&r.line_label),
+                        csv_field(&r.full_text)
+                    ));
+                }
+                s
+            }
+            ExportFormat::Json => {
+                let arr: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "path": r.path_display,
+                            "line": r.line_label,
+                            "text": r.full_text,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&arr).unwrap_or_default()
+            }
+            ExportFormat::Text => {
+                let mut s = String::new();
+                for r in &rows {
+                    s.push_str(&format!(
+                        "{}:{}: {}\n",
+                        r.path_display, r.line_label, r.preview
+                    ));
+                }
+                s
+            }
+        };
+
+        self.status_notice = Some(match std::fs::write(&path, content) {
+            Ok(()) => format!("Exported {} result(s) to {}", rows.len(), path.display()),
+            Err(e) => format!("Export failed: {e}"),
+        });
+    }
+
+    /// Indices into `results` currently visible under the in-place result filter.
+    fn visible_indices(&self) -> Vec<usize> {
+        let f = self.result_filter.trim().to_ascii_lowercase();
+        if f.is_empty() {
+            (0..self.results.len()).collect()
+        } else {
+            self.results
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    r.file_name.to_ascii_lowercase().contains(&f)
+                        || r.preview.to_ascii_lowercase().contains(&f)
+                })
+                .map(|(i, _)| i)
+                .collect()
+        }
+    }
+
     fn results_table(&self, ui: &mut egui::Ui) {
+        let visible = self.visible_indices();
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size + 6.0;
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .sense(egui::Sense::click())
             .column(Column::auto().at_least(160.0)) // file
             .column(Column::auto().at_least(48.0)) // line
             .column(Column::remainder()) // text
@@ -768,8 +915,8 @@ impl App {
                 });
             })
             .body(|body| {
-                body.rows(text_height, self.results.len(), |mut row| {
-                    let r = &self.results[row.index()];
+                body.rows(text_height, visible.len(), |mut row| {
+                    let r = &self.results[visible[row.index()]];
                     row.col(|ui| {
                         ui.label(&r.file_name).on_hover_text(&r.path_display);
                     });
@@ -786,6 +933,30 @@ impl App {
                         }
                         None => {
                             ui.label(&r.preview).on_hover_text(&r.full_text);
+                        }
+                    });
+
+                    // Row-level actions: double-click opens; right-click menu.
+                    let resp = row.response();
+                    if resp.double_clicked() {
+                        super::reveal::open_path(&r.path);
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("Open").clicked() {
+                            super::reveal::open_path(&r.path);
+                            ui.close();
+                        }
+                        if ui.button("Reveal in file manager").clicked() {
+                            super::reveal::reveal(&r.path);
+                            ui.close();
+                        }
+                        if ui.button("Copy path").clicked() {
+                            ui.ctx().copy_text(r.path_display.clone());
+                            ui.close();
+                        }
+                        if ui.button("Copy matched text").clicked() {
+                            ui.ctx().copy_text(r.full_text.clone());
+                            ui.close();
                         }
                     });
                 });
@@ -832,6 +1003,8 @@ impl eframe::App for App {
                     });
                 });
             } else {
+                self.results_toolbar(ui);
+                ui.separator();
                 self.results_table(ui);
             }
         });
