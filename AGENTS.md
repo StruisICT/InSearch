@@ -80,7 +80,9 @@ GUI and CLI enable `all-formats`; core's default build stays lean.
 `.github/workflows/`: `build.yml` (Windows — fmt/clippy/test gate + release exe
 + CLI smoke + artifact/release-attach), `linux.yml` (portable tarball, installs
 GTK/wayland/x11/GL), `release-please.yml` (simple release-type → tags vX.Y.Z that
-trigger the build workflows). No git remote configured yet.
+trigger the build workflows). Releases are automated: merging the release PR
+tags the version via `RELEASE_PLEASE_TOKEN`, which fires build.yml/linux.yml to
+attach the binaries.
 
 ## Status
 
