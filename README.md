@@ -7,7 +7,12 @@ Matches can be reported **per line** or **per timestamp-to-timestamp block**.
 
 Rust + [egui](https://github.com/emilk/egui). Windows-first, Linux-portable.
 
-![InSearch searching two logs for "ERROR", with matches highlighted and a live match/timing counter](docs/screenshot.png)
+Searching two logs for `ERROR` — matches highlighted, with a live match/timing
+counter. Ships in dark and warm-white light themes:
+
+| Dark | Light |
+| --- | --- |
+| ![Dark theme](docs/screenshot.png) | ![Light theme](docs/screenshot-light.png) |
 
 ## Status
 

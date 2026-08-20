@@ -658,8 +658,19 @@ impl App {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let pal = super::palette::palette(self.dark);
         ui.horizontal(|ui| {
-            ui.heading("InSearch");
+            ui.label(
+                egui::RichText::new("InSearch")
+                    .color(pal.blue)
+                    .strong()
+                    .size(20.0),
+            );
+            ui.label(
+                egui::RichText::new("Struis ICT")
+                    .color(pal.subtext)
+                    .size(12.0),
+            );
             ui.separator();
             if ui
                 .selectable_label(self.mode == Mode::Live, "Live")
@@ -1139,33 +1150,50 @@ impl eframe::App for App {
 
         self.drain_results();
 
-        egui::Panel::top("top").show(ui, |ui| {
+        let pal = super::palette::palette(self.dark);
+        let panel_frame = egui::Frame::new()
+            .fill(pal.panel_bg)
+            .inner_margin(egui::Margin::symmetric(14, 10));
+
+        egui::Panel::top("top").frame(panel_frame).show(ui, |ui| {
             self.top_bar(ui);
         });
 
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(self.status_line());
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.panel_bg)
+                    .inner_margin(egui::Margin::symmetric(14, 6)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(pal.subtext, self.status_line());
+                });
             });
-        });
 
         self.settings_window(&ctx);
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.results.is_empty() && !self.searching {
-                ui.centered_and_justified(|ui| {
-                    ui.weak(if self.roots.is_empty() {
-                        "Add a folder, then type a query."
-                    } else {
-                        "Type at least two characters to search."
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.win_bg)
+                    .inner_margin(egui::Margin::symmetric(14, 10)),
+            )
+            .show(ui, |ui| {
+                if self.results.is_empty() && !self.searching {
+                    ui.centered_and_justified(|ui| {
+                        ui.weak(if self.roots.is_empty() {
+                            "Add a folder, then type a query."
+                        } else {
+                            "Type at least two characters to search."
+                        });
                     });
-                });
-            } else {
-                self.results_toolbar(ui);
-                ui.separator();
-                self.results_table(ui);
-            }
-        });
+                } else {
+                    self.results_toolbar(ui);
+                    ui.add_space(4.0);
+                    self.results_table(ui);
+                }
+            });
 
         // Keep draining while a search streams in (fast) or a watch is active
         // (slower poll — watch updates are low-frequency).
