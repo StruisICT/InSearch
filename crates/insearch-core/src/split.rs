@@ -18,6 +18,13 @@ pub struct Unit<'a> {
     pub byte_offset: u64,
 }
 
+/// Strip a single trailing line terminator (`\n` or `\r\n`) from a line,
+/// returning the content without reallocating.
+pub(crate) fn strip_eol(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
 /// Splits text into units. Implementations must be cheap to share across
 /// threads.
 pub trait UnitSplitter: Send + Sync {
@@ -36,12 +43,10 @@ impl UnitSplitter for LineSplitter {
         let mut offset: u64 = 0;
         for (idx, line) in text.split_inclusive('\n').enumerate() {
             let line_no = idx as u64 + 1;
-            // Strip the trailing "\n" / "\r\n" for the unit text without losing
-            // the byte accounting.
-            let trimmed = line.strip_suffix('\n').unwrap_or(line);
-            let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+            // Drop the trailing terminator for the unit text; `offset` below
+            // still advances by the full line length to keep byte accounting.
             let keep = sink(Unit {
-                text: trimmed,
+                text: strip_eol(line),
                 line_start: line_no,
                 line_end: line_no,
                 byte_offset: offset,
@@ -122,9 +127,7 @@ impl UnitSplitter for BlockSplitter {
         for line in text.split_inclusive('\n') {
             cur_line += 1;
             let line_start_byte = byte;
-            let content = line.strip_suffix('\n').unwrap_or(line);
-            let content = content.strip_suffix('\r').unwrap_or(content);
-            let is_ts = self.is_timestamp_line(content);
+            let is_ts = self.is_timestamp_line(strip_eol(line));
 
             // A new timestamp (or the size cap) closes the block in progress.
             let start_new = lines_in_block > 0 && (is_ts || lines_in_block >= self.max_lines);

@@ -12,8 +12,7 @@ pub enum Granularity {
     Block,
 }
 
-/// Live search-as-you-type vs. watch-folders mode. Watch lands in a later phase;
-/// carried here so the model is stable across phases.
+/// Live search-as-you-type vs. watch-folders (log-tailing) mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
@@ -52,15 +51,16 @@ pub struct Match {
     pub path: PathBuf,
     /// 1-based line number where the matched unit starts.
     pub line_start: u64,
-    /// 1-based line number where the matched unit ends
-    /// (== `line_start` for line mode).
+    /// 1-based line number where the matched unit ends (== `line_start` for
+    /// line mode).
     pub line_end: u64,
     /// Byte offset of the unit start within the file (for jump-to / tailing).
+    /// Approximate for non-UTF-8 input, which is decoded lossily first.
     pub byte_offset: u64,
     /// The unit text (single line, or whole block), possibly capped for display.
     pub text: String,
-    /// The specific line within a block that matched
-    /// (== `line_start` for line mode).
+    /// The specific line within a block that matched (== `line_start` for line
+    /// mode).
     pub matched_line: u64,
 }
 
@@ -70,6 +70,7 @@ pub struct Match {
 /// consumer can drop results from a superseded (stale) search.
 #[derive(Clone, Debug)]
 pub enum SearchEvent {
+    /// A hit (the leading `u64` is the generation, as for every variant).
     Match(u64, Match),
     /// Drop all existing matches for this path (watch mode: a file changed,
     /// was removed, or is about to be fully re-scanned). No-op if none exist.

@@ -84,13 +84,13 @@ impl TextExtractor for PlainTextExtractor {
 
 /// Maps file extensions to the extractor that handles them.
 ///
-/// Binary-format extractors register here in Phase 4. Until then everything
-/// resolves to [`PlainTextExtractor`], and files with unknown extensions are
-/// still searched as raw text (grep-searcher skips true binaries).
+/// Binary-format extractors (pdf/xls/docx) register via [`default_registry`]
+/// when their features are enabled; files with unknown extensions fall back to
+/// raw text (grep-searcher skips true binaries).
 pub struct Registry {
     plain: PlainTextExtractor,
-    /// Format-specific extractors (Phase 4). Each is stored once; the extension
-    /// index below points into this vec.
+    /// Format-specific extractors. Each is stored once; the extension index
+    /// below points into this vec.
     extractors: Vec<Box<dyn TextExtractor>>,
     /// Lowercase extension -> index into `extractors`.
     by_ext: Vec<(String, usize)>,
@@ -131,11 +131,6 @@ impl Registry {
             }
         }
         &self.plain
-    }
-
-    /// Whether the extension is one we explicitly recognise as plain text.
-    pub fn is_known_text(ext: &str) -> bool {
-        PLAIN_TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str())
     }
 }
 
@@ -343,13 +338,6 @@ mod tests {
             e.extract(Path::new("mystery.weirdext")).unwrap(),
             Some(Source::Raw)
         ));
-    }
-
-    #[test]
-    fn known_text_predicate_is_case_insensitive() {
-        assert!(Registry::is_known_text("LOG"));
-        assert!(Registry::is_known_text("json"));
-        assert!(!Registry::is_known_text("pdf"));
     }
 
     /// With a binary-format feature on, the default registry resolves that

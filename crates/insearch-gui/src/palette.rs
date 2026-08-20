@@ -1,5 +1,5 @@
-//! Minimal light/dark theming. Kept tiny for the MVP; expand later to match
-//! ClutterCutter's warm-white palette if desired.
+//! Minimal light/dark theming. Kept tiny for now; expand later with a custom
+//! palette if desired.
 
 use eframe::egui;
 

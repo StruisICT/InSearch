@@ -33,8 +33,8 @@ use notify_debouncer_full::{
 };
 
 use crate::model::{Granularity, Match, Query, SearchEvent};
-use crate::scan::{build_matcher, search_one_blocks};
-use crate::split::BlockSplitter;
+use crate::scan::{build_matcher, search_file_blocks};
+use crate::split::{strip_eol, BlockSplitter};
 
 /// Debounce window for coalescing bursts of filesystem events.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -199,7 +199,7 @@ impl Tailer {
             return;
         }
         if let Some(bs) = &self.block {
-            let _ = search_one_blocks(
+            let _ = search_file_blocks(
                 &self.matcher,
                 path,
                 bs,
@@ -278,8 +278,7 @@ impl Tailer {
         let mut byte_in_chunk: u64 = 0;
         for line in text.split_inclusive('\n') {
             local_line += 1;
-            let content = line.strip_suffix('\n').unwrap_or(line);
-            let content = content.strip_suffix('\r').unwrap_or(content);
+            let content = strip_eol(line);
             if self.matcher.is_match(content.as_bytes()).unwrap_or(false) {
                 let m = Match {
                     path: path.to_path_buf(),

@@ -41,13 +41,13 @@ pub struct App {
     roots: Vec<PathBuf>,
 
     // Search worker state
-    gen_counter: Arc<AtomicU64>,
-    active_gen: u64,
+    generation_counter: Arc<AtomicU64>,
+    active_generation: u64,
     rx: Option<Receiver<SearchEvent>>,
     searching: bool,
     watching: bool,
     watch_handle: Option<insearch_core::WatchHandle>,
-    results: Vec<Match>,
+    results: Vec<ResultRow>,
     truncated: bool,
     error: Option<String>,
 
@@ -70,8 +70,52 @@ struct PendingWatch {
     generation: u64,
     roots: Vec<PathBuf>,
     query: Query,
-    gen_counter: Arc<AtomicU64>,
+    generation_counter: Arc<AtomicU64>,
     tx: Sender<SearchEvent>,
+}
+
+/// A search hit with its display strings computed once on ingest, so the
+/// virtualized results table doesn't reallocate them every frame.
+struct ResultRow {
+    path: PathBuf,
+    file_name: String,
+    path_display: String,
+    line_label: String,
+    line_hover: Option<String>,
+    preview: String,
+    full_text: String,
+}
+
+impl ResultRow {
+    fn from_match(m: Match) -> Self {
+        let file_name = m
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path_display = m.path.display().to_string();
+        // A multi-line block match shows a line range and a "match on line N"
+        // hover; a single-line match shows just the number.
+        let (line_label, line_hover) = if m.line_end > m.line_start {
+            (
+                format!("{}-{}", m.line_start, m.line_end),
+                Some(format!("match on line {}", m.matched_line)),
+            )
+        } else {
+            (m.line_start.to_string(), None)
+        };
+        // Collapse newlines so a block occupies one virtualized row.
+        let preview = m.text.replace(['\r', '\n'], " ⏎ ");
+        ResultRow {
+            path: m.path,
+            file_name,
+            path_display,
+            line_label,
+            line_hover,
+            preview,
+            full_text: m.text,
+        }
+    }
 }
 
 impl App {
@@ -86,8 +130,8 @@ impl App {
             respect_gitignore: false,
             dark,
             roots: initial_root.into_iter().collect(),
-            gen_counter: Arc::new(AtomicU64::new(0)),
-            active_gen: 0,
+            generation_counter: Arc::new(AtomicU64::new(0)),
+            active_generation: 0,
             rx: None,
             searching: false,
             watching: false,
@@ -120,7 +164,7 @@ impl App {
 
     /// Cancel any running search/watch and clear results (without restarting).
     fn cancel(&mut self) {
-        self.gen_counter.fetch_add(1, Ordering::SeqCst);
+        self.generation_counter.fetch_add(1, Ordering::SeqCst);
         self.searching = false;
         self.watching = false;
         self.watch_handle = None; // drop stops the OS watcher + worker
@@ -146,8 +190,8 @@ impl App {
             return;
         }
 
-        let g = self.gen_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        self.active_gen = g;
+        let g = self.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        self.active_generation = g;
         self.results.clear();
         self.truncated = false;
         self.error = None;
@@ -159,16 +203,16 @@ impl App {
 
         let roots = self.roots.clone();
         let opts = self.scan_options();
-        let gen_counter = self.gen_counter.clone();
+        let generation_counter = self.generation_counter.clone();
 
         // Initial full scan (both modes) on its own thread.
         {
             let tx = tx.clone();
             let roots = roots.clone();
             let query = query.clone();
-            let gen_counter = gen_counter.clone();
+            let generation_counter = generation_counter.clone();
             std::thread::spawn(move || {
-                insearch_core::search(&roots, &query, g, gen_counter, opts, tx);
+                insearch_core::search(&roots, &query, g, generation_counter, opts, tx);
             });
         }
 
@@ -181,7 +225,7 @@ impl App {
                 generation: g,
                 roots,
                 query,
-                gen_counter,
+                generation_counter,
                 tx,
             });
         }
@@ -192,11 +236,16 @@ impl App {
         let Some(pw) = self.pending_watch.take() else {
             return;
         };
-        if pw.generation != self.active_gen {
+        if pw.generation != self.active_generation {
             return; // superseded before the scan finished
         }
-        match insearch_core::start_watch(&pw.roots, &pw.query, pw.generation, pw.gen_counter, pw.tx)
-        {
+        match insearch_core::start_watch(
+            &pw.roots,
+            &pw.query,
+            pw.generation,
+            pw.generation_counter,
+            pw.tx,
+        ) {
             Ok(handle) => {
                 self.watch_handle = Some(handle);
                 self.watching = true;
@@ -214,17 +263,17 @@ impl App {
         for ev in events {
             match ev {
                 SearchEvent::Match(g, m) => {
-                    if g == self.active_gen {
+                    if g == self.active_generation {
                         if self.results.len() < MAX_RESULTS {
-                            self.results.push(m);
+                            self.results.push(ResultRow::from_match(m));
                         } else {
                             self.truncated = true;
                         }
                     }
                 }
                 SearchEvent::Clear(g, path) => {
-                    if g == self.active_gen {
-                        self.results.retain(|m| m.path != path);
+                    if g == self.active_generation {
+                        self.results.retain(|r| r.path != path);
                         // Removing rows may reopen room under the cap.
                         if self.truncated && self.results.len() < MAX_RESULTS {
                             self.truncated = false;
@@ -232,14 +281,14 @@ impl App {
                     }
                 }
                 SearchEvent::Done(g) => {
-                    if g == self.active_gen {
+                    if g == self.active_generation {
                         self.searching = false;
                         // Initial scan finished — safe to begin watching now.
                         self.start_pending_watch();
                     }
                 }
                 SearchEvent::Error(g, e) => {
-                    if g == self.active_gen {
+                    if g == self.active_generation {
                         self.error = Some(e);
                         self.searching = false;
                     }
@@ -469,29 +518,18 @@ impl App {
             })
             .body(|body| {
                 body.rows(text_height, self.results.len(), |mut row| {
-                    let m = &self.results[row.index()];
+                    let r = &self.results[row.index()];
                     row.col(|ui| {
-                        let name = m
-                            .path
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        ui.label(name).on_hover_text(m.path.display().to_string());
+                        ui.label(&r.file_name).on_hover_text(&r.path_display);
                     });
                     row.col(|ui| {
-                        // Show a range for multi-line block matches; a single
-                        // number for line matches.
-                        if m.line_end > m.line_start {
-                            ui.monospace(format!("{}-{}", m.line_start, m.line_end))
-                                .on_hover_text(format!("match on line {}", m.matched_line));
-                        } else {
-                            ui.monospace(m.line_start.to_string());
+                        let resp = ui.monospace(&r.line_label);
+                        if let Some(hover) = &r.line_hover {
+                            resp.on_hover_text(hover);
                         }
                     });
                     row.col(|ui| {
-                        // Collapse newlines so a block occupies one virtualized row.
-                        let flat = m.text.replace(['\r', '\n'], " ⏎ ");
-                        ui.label(flat).on_hover_text(&m.text);
+                        ui.label(&r.preview).on_hover_text(&r.full_text);
                     });
                 });
             });

@@ -14,8 +14,9 @@ crates/
   insearch-core/   # engine — no GUI, no OS-specific code
     model.rs     # Query, Match, SearchEvent, Granularity, Mode
     extract.rs   # TextExtractor trait + Registry (Raw vs Materialized text)
-    split.rs     # UnitSplitter trait; LineSplitter now, BlockSplitter (Phase 2)
+    split.rs     # UnitSplitter trait; LineSplitter + BlockSplitter (timestamp)
     scan.rs      # ignore::WalkParallel + grep-regex/grep-searcher, streaming
+    watch.rs     # notify debouncer + log-tailing offset map
   insearch-gui/    # eframe/egui front-end (glow backend only)
     main.rs      # launch + argv path prefill
     app.rs       # state, debounce, worker plumbing, results table
@@ -51,8 +52,8 @@ plain-text fast path additionally uses `grep-searcher`'s `Searcher`.
 
 - Keep the tree `cargo fmt`-clean and `cargo clippy --all-targets -- -D warnings`-clean.
 - Conventional Commits (feat/fix/docs/refactor/perf/test/build/ci/chore). SemVer, pre-1.0.
-- Portable code in `insearch-core`; OS-specific code behind `#[cfg(...)]` (context
-  menu / registry lands in a `insearch-platform` module in Phase 5).
+- Portable code in `insearch-core`; OS-specific code behind `#[cfg(...)]` (the
+  Explorer context menu / registry lives in `insearch-gui/src/context_menu.rs`).
 - `eframe` with the **glow** backend only (no wgpu). Don't hard-pin the patch
   version (`0.36`, not `=0.36.1`).
 - Don't commit build artifacts (`/target` is gitignored).

@@ -22,7 +22,7 @@ use ignore::{WalkBuilder, WalkState};
 
 use crate::extract::{default_registry, Source};
 use crate::model::{Granularity, Match, Query, SearchEvent};
-use crate::split::{BlockSplitter, Unit, UnitSplitter};
+use crate::split::{strip_eol, BlockSplitter, Unit, UnitSplitter};
 
 /// Cap block text length (in characters) held per match for display.
 const BLOCK_DISPLAY_CAP: usize = 2000;
@@ -51,7 +51,7 @@ impl Default for ScanOptions {
 }
 
 /// Build a grep matcher from a query. Literal queries are regex-escaped.
-pub fn build_matcher(query: &Query) -> Result<RegexMatcher, String> {
+pub(crate) fn build_matcher(query: &Query) -> Result<RegexMatcher, String> {
     let pattern = if query.is_regex {
         query.pattern.clone()
     } else {
@@ -136,14 +136,14 @@ pub fn search(
                 // Plain text / logs: search the file in place.
                 Ok(Some(Source::Raw)) => match &block_splitter {
                     Some(bs) => {
-                        search_one_blocks(&matcher, &path, bs, generation, &current_gen, &tx)
+                        search_file_blocks(&matcher, &path, bs, generation, &current_gen, &tx)
                     }
-                    None => search_one(&matcher, &path, generation, &current_gen, &tx),
+                    None => search_file_lines(&matcher, &path, generation, &current_gen, &tx),
                 },
                 // Decoded binary format: search the materialized text.
                 Ok(Some(Source::Materialized(text))) => {
                     let cancelled = match &block_splitter {
-                        Some(bs) => emit_block_matches(
+                        Some(bs) => search_text_blocks(
                             &matcher,
                             &path,
                             bs,
@@ -153,7 +153,7 @@ pub fn search(
                             &tx,
                         ),
                         None => {
-                            emit_line_matches(&matcher, &path, &text, generation, &current_gen, &tx)
+                            search_text_lines(&matcher, &path, &text, generation, &current_gen, &tx)
                         }
                     };
                     if cancelled {
@@ -172,7 +172,7 @@ pub fn search(
 }
 
 /// Search a single file's raw bytes with grep-searcher (line mode fast path).
-fn search_one(
+fn search_file_lines(
     matcher: &RegexMatcher,
     path: &Path,
     generation: u64,
@@ -198,7 +198,7 @@ fn search_one(
 /// Search a single file in block mode: read it, split into timestamp blocks,
 /// and emit one match per block that contains a matching line. Reused by the
 /// watch module for block-mode re-scans.
-pub(crate) fn search_one_blocks(
+pub(crate) fn search_file_blocks(
     matcher: &RegexMatcher,
     path: &Path,
     splitter: &BlockSplitter,
@@ -222,7 +222,7 @@ pub(crate) fn search_one_blocks(
         return WalkState::Continue;
     }
     let text = String::from_utf8_lossy(&bytes);
-    if emit_block_matches(matcher, path, splitter, &text, generation, current_gen, tx) {
+    if search_text_blocks(matcher, path, splitter, &text, generation, current_gen, tx) {
         WalkState::Quit
     } else {
         WalkState::Continue
@@ -232,7 +232,7 @@ pub(crate) fn search_one_blocks(
 /// Split in-memory `text` into blocks and emit one match per block containing a
 /// match. Returns `true` if cancelled mid-way. Shared by on-disk block search
 /// and by extractor-materialized text (pdf/xls/docx).
-pub(crate) fn emit_block_matches(
+pub(crate) fn search_text_blocks(
     matcher: &RegexMatcher,
     path: &Path,
     splitter: &BlockSplitter,
@@ -273,8 +273,8 @@ pub(crate) fn emit_block_matches(
 
 /// Line-search in-memory `text` (extractor-materialized formats). Returns `true`
 /// if cancelled. The on-disk line path uses grep-searcher instead (see
-/// [`search_one`]).
-pub(crate) fn emit_line_matches(
+/// [`search_file_lines`]).
+pub(crate) fn search_text_lines(
     matcher: &RegexMatcher,
     path: &Path,
     text: &str,
@@ -287,8 +287,7 @@ pub(crate) fn emit_line_matches(
         if current_gen.load(Ordering::Relaxed) != generation {
             return true;
         }
-        let content = line.strip_suffix('\n').unwrap_or(line);
-        let content = content.strip_suffix('\r').unwrap_or(content);
+        let content = strip_eol(line);
         if matcher.is_match(content.as_bytes()).unwrap_or(false) {
             let ln = idx as u64 + 1;
             let m = Match {
@@ -308,10 +307,12 @@ pub(crate) fn emit_line_matches(
     false
 }
 
-/// The first line within a block (by absolute line number) that matches.
+/// The first line within a block (by absolute line number) that matches. The
+/// block text is already free of its trailing terminator, so `split('\n')` won't
+/// yield a dangling empty segment; `strip_eol` handles any interior `\r`.
 fn first_matching_line(matcher: &RegexMatcher, unit: &Unit<'_>) -> Option<u64> {
     for (ln, line) in (unit.line_start..).zip(unit.text.split('\n')) {
-        let line = line.strip_suffix('\r').unwrap_or(line);
+        let line = strip_eol(line);
         if matcher.is_match(line.as_bytes()).unwrap_or(false) {
             return Some(ln);
         }
