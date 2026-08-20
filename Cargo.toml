@@ -26,6 +26,7 @@ crossbeam-channel = "0.5"
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwind (not abort) so a panic inside a third-party document parser can be
+# caught per-file (see extract.rs) instead of taking down the whole process.
 strip = true
 overflow-checks = false

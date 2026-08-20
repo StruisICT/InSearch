@@ -170,6 +170,26 @@ pub mod formats {
     #[allow(unused_imports)]
     use std::path::Path;
 
+    /// Skip documents larger than this before decoding — a guard against OOM and
+    /// zip/decompression amplification on hostile inputs.
+    #[cfg(any(feature = "xls", feature = "docx", feature = "pdf"))]
+    const MAX_EXTRACT_BYTES: u64 = 256 * 1024 * 1024;
+
+    #[cfg(any(feature = "xls", feature = "docx", feature = "pdf"))]
+    fn too_large(path: &Path) -> bool {
+        std::fs::metadata(path)
+            .map(|m| m.len() > MAX_EXTRACT_BYTES)
+            .unwrap_or(false)
+    }
+
+    /// Run a third-party parser that may *panic* on crafted input, mapping a
+    /// caught panic (and any `None`) to "skip this file". Requires the release
+    /// profile to unwind rather than abort (see the workspace `Cargo.toml`).
+    #[cfg(any(feature = "xls", feature = "docx", feature = "pdf"))]
+    fn guard<T>(parse: impl FnOnce() -> Option<T> + std::panic::UnwindSafe) -> Option<T> {
+        std::panic::catch_unwind(parse).unwrap_or(None)
+    }
+
     /// xls/xlsx/xlsb/ods via `calamine` (pure Rust). Rows become tab-separated
     /// lines, sheets concatenated.
     #[cfg(feature = "xls")]
@@ -182,28 +202,33 @@ pub mod formats {
         }
 
         fn extract(&self, path: &Path) -> std::io::Result<Option<Source>> {
-            use calamine::{open_workbook_auto, Reader};
-            use std::fmt::Write as _;
-            let mut wb = match open_workbook_auto(path) {
-                Ok(w) => w,
-                Err(_) => return Ok(None),
-            };
-            let mut out = String::new();
-            for name in wb.sheet_names() {
-                if let Ok(range) = wb.worksheet_range(&name) {
-                    for row in range.rows() {
-                        for (i, cell) in row.iter().enumerate() {
-                            if i > 0 {
-                                out.push('\t');
-                            }
-                            let _ = write!(out, "{cell}");
+            if too_large(path) {
+                return Ok(None);
+            }
+            Ok(guard(|| extract_spreadsheet(path)).map(Source::Materialized))
+        }
+    }
+
+    #[cfg(feature = "xls")]
+    fn extract_spreadsheet(path: &Path) -> Option<String> {
+        use calamine::{open_workbook_auto, Reader};
+        use std::fmt::Write as _;
+        let mut wb = open_workbook_auto(path).ok()?;
+        let mut out = String::new();
+        for name in wb.sheet_names() {
+            if let Ok(range) = wb.worksheet_range(&name) {
+                for row in range.rows() {
+                    for (i, cell) in row.iter().enumerate() {
+                        if i > 0 {
+                            out.push('\t');
                         }
-                        out.push('\n');
+                        let _ = write!(out, "{cell}");
                     }
+                    out.push('\n');
                 }
             }
-            Ok(Some(Source::Materialized(out)))
         }
+        Some(out)
     }
 
     /// docx via `zip` + `quick-xml`: pull text runs from `word/document.xml`,
@@ -218,27 +243,31 @@ pub mod formats {
         }
 
         fn extract(&self, path: &Path) -> std::io::Result<Option<Source>> {
-            use std::io::Read as _;
-            let file = match std::fs::File::open(path) {
-                Ok(f) => f,
-                Err(_) => return Ok(None),
-            };
-            let mut zip = match zip::ZipArchive::new(file) {
-                Ok(z) => z,
-                Err(_) => return Ok(None),
-            };
-            let mut xml = String::new();
-            {
-                let mut entry = match zip.by_name("word/document.xml") {
-                    Ok(e) => e,
-                    Err(_) => return Ok(None),
-                };
-                if entry.read_to_string(&mut xml).is_err() {
-                    return Ok(None);
-                }
+            if too_large(path) {
+                return Ok(None);
             }
-            Ok(Some(Source::Materialized(docx_xml_to_text(&xml))))
+            Ok(guard(|| extract_docx(path)).map(Source::Materialized))
         }
+    }
+
+    #[cfg(feature = "docx")]
+    fn extract_docx(path: &Path) -> Option<String> {
+        use std::io::Read as _;
+        let file = std::fs::File::open(path).ok()?;
+        let mut zip = zip::ZipArchive::new(file).ok()?;
+        let mut xml = String::new();
+        {
+            let entry = zip.by_name("word/document.xml").ok()?;
+            // Cap the *decompressed* read so a small archive can't inflate to GBs.
+            if entry
+                .take(MAX_EXTRACT_BYTES)
+                .read_to_string(&mut xml)
+                .is_err()
+            {
+                return None;
+            }
+        }
+        Some(docx_xml_to_text(&xml))
     }
 
     #[cfg(feature = "docx")]
@@ -285,10 +314,11 @@ pub mod formats {
         }
 
         fn extract(&self, path: &Path) -> std::io::Result<Option<Source>> {
-            match pdf_extract::extract_text(path) {
-                Ok(text) => Ok(Some(Source::Materialized(text))),
-                Err(_) => Ok(None),
+            if too_large(path) {
+                return Ok(None);
             }
+            // pdf-extract / lopdf can panic on malformed PDFs — isolate it.
+            Ok(guard(|| pdf_extract::extract_text(path).ok()).map(Source::Materialized))
         }
     }
 }

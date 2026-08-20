@@ -26,11 +26,13 @@ notify-debouncer-full = "0.7"
 
 # Optional binary-format extractors (pure-Rust; pdf-extract is lopdf-based).
 calamine = { version = "0.36", optional = true }
-zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+# zip 8.x: unifies with calamine's zip and avoids RUSTSEC-2025-0071 (the 2.5/2.6
+# fixes were yanked).
+zip = { version = "8", optional = true, default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.41", optional = true }
 pdf-extract = { version = "0.12", optional = true }
 
 [dev-dependencies]
 crossbeam-channel.workspace = true
 # Used by tests to synthesize office (zip-based) fixtures.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }

@@ -27,6 +27,10 @@ use crate::split::{BlockSplitter, Unit, UnitSplitter};
 /// Cap block text length (in characters) held per match for display.
 const BLOCK_DISPLAY_CAP: usize = 2000;
 
+/// Block mode reads whole files into memory (the line path streams via
+/// grep-searcher instead). Skip files above this to bound memory on huge logs.
+const MAX_BLOCK_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Options controlling the walk. Sensible defaults for a document/log searcher:
 /// see everything (don't honour `.gitignore`, do descend hidden dirs).
 #[derive(Clone, Copy, Debug)]
@@ -202,6 +206,13 @@ pub(crate) fn search_one_blocks(
     current_gen: &Arc<AtomicU64>,
     tx: &Sender<SearchEvent>,
 ) -> WalkState {
+    // Bound memory: skip files too large to read whole into RAM in block mode.
+    if std::fs::metadata(path)
+        .map(|m| m.len() > MAX_BLOCK_FILE_BYTES)
+        .unwrap_or(false)
+    {
+        return WalkState::Continue;
+    }
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(_) => return WalkState::Continue,
