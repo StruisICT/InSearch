@@ -1,3 +1,5 @@
-// Embed the application manifest as resource id 1, type RT_MANIFEST (24).
-// An application icon can be added later, e.g.:  IDI_ICON1 ICON "app.ico"
+// Embed the application manifest (id 1, type RT_MANIFEST=24) and the app icon.
+// The lowest-id ICON becomes the executable's default icon (Explorer, taskbar,
+// and the "Search with InSearch" context-menu entry, which references the exe).
 1 24 "app.manifest"
+1 ICON "app.ico"

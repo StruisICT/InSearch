@@ -11,6 +11,10 @@ mod palette;
 mod reveal;
 mod session;
 
+/// App icon, used for the window/taskbar (cross-platform). On Windows the same
+/// artwork is also embedded in the exe via `app.rc` for Explorer/context menu.
+const ICON_PNG: &[u8] = include_bytes!("../icon-256.png");
+
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -22,11 +26,16 @@ fn main() -> eframe::Result<()> {
         .find(|a| !a.starts_with('-'))
         .map(PathBuf::from);
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1080.0, 700.0])
+        .with_min_inner_size([720.0, 460.0])
+        .with_title("InSearch");
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON_PNG) {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1080.0, 700.0])
-            .with_min_inner_size([720.0, 460.0])
-            .with_title("InSearch"),
+        viewport,
         ..Default::default()
     };
 
