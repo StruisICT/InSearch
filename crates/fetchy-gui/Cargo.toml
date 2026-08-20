@@ -1,0 +1,33 @@
+[package]
+name = "fetchy-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Inspector Fetchy — egui desktop front-end."
+
+[[bin]]
+name = "fetchy-gui"
+path = "src/main.rs"
+
+[dependencies]
+fetchy-core = { path = "../fetchy-core", features = ["all-formats"] }
+crossbeam-channel.workspace = true
+# glow backend only (no wgpu/DirectX) — smaller binary, faster link, Linux-ready.
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+egui_extras = "0.36"
+rfd = "0.17"
+
+# Windows-only: registry access for the Explorer context-menu integration.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+# Windows-only: embed the app manifest (DPI awareness, common controls).
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

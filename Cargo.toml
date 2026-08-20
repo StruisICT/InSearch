@@ -1,0 +1,31 @@
+# Inspector Fetchy — cargo workspace
+# A headless, testable core (`fetchy-core`) drives both the egui GUI
+# (`fetchy-gui`) and a CLI harness (`fetchy-cli`). Heavy/native extractor
+# deps and OS-specific code stay out of the GUI build.
+[workspace]
+resolver = "2"
+members = ["crates/fetchy-core", "crates/fetchy-cli", "crates/fetchy-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Struis ICT"]
+publish = false
+
+[workspace.dependencies]
+grep-searcher = "0.1.17"
+grep-regex = "0.1.14"
+grep-matcher = "0.1.8"
+ignore = "0.4.33"
+regex = "1.13"
+crossbeam-channel = "0.5"
+
+# Aggressive size/perf-oriented release profile (mirrors ClutterCutter).
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false

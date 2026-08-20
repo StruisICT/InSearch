@@ -1,0 +1,36 @@
+[package]
+name = "fetchy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Content-aware file search engine: walk, extract, split, match — headless."
+
+[features]
+default = []
+# Binary-format extractors, opt-in to keep the base build lean.
+xls = ["dep:calamine"]
+docx = ["dep:zip", "dep:quick-xml"]
+pdf = ["dep:pdf-extract"]
+all-formats = ["xls", "docx", "pdf"]
+
+[dependencies]
+grep-searcher.workspace = true
+grep-regex.workspace = true
+grep-matcher.workspace = true
+ignore.workspace = true
+regex.workspace = true
+crossbeam-channel.workspace = true
+notify-debouncer-full = "0.7"
+
+# Optional binary-format extractors (pure-Rust; pdf-extract is lopdf-based).
+calamine = { version = "0.36", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.41", optional = true }
+pdf-extract = { version = "0.12", optional = true }
+
+[dev-dependencies]
+crossbeam-channel.workspace = true
+# Used by tests to synthesize office (zip-based) fixtures.
+zip = { version = "2", default-features = false, features = ["deflate"] }
