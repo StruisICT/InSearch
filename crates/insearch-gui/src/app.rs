@@ -8,7 +8,7 @@
 //!     search is live.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -146,6 +146,15 @@ pub struct App {
     result_filter: String,
     /// Transient message shown in the status bar (e.g. after an export).
     status_notice: Option<String>,
+    /// Files scanned so far by the active search (incremented by the engine).
+    scanned: Arc<AtomicUsize>,
+    /// When the active search started, and the frozen elapsed time on `Done`.
+    search_started: Option<Instant>,
+    search_elapsed: Option<Duration>,
+
+    // Session (persisted): recent queries + saved searches.
+    session: super::session::Session,
+    save_name: String,
 
     // Debounce bookkeeping
     pending_since: Option<Instant>,
@@ -249,6 +258,11 @@ impl App {
             highlight: None,
             result_filter: String::new(),
             status_notice: None,
+            scanned: Arc::new(AtomicUsize::new(0)),
+            search_started: None,
+            search_elapsed: None,
+            session: super::session::Session::load(),
+            save_name: String::new(),
             pending_since: None,
             show_settings: false,
             settings_msg: None,
@@ -285,6 +299,57 @@ impl App {
             max_size: parse_kb(&self.filter_max_kb),
             modified_within_days: parse_u64(&self.filter_days),
         }
+    }
+
+    /// Capture the current query options as a named saved search.
+    fn current_saved(&self, name: String) -> super::session::SavedSearch {
+        super::session::SavedSearch {
+            name,
+            query: self.query_text.clone(),
+            exclude: self.exclude_text.clone(),
+            match_mode: match self.match_mode {
+                MatchMode::Substring => 0,
+                MatchMode::Regex => 1,
+                MatchMode::AllWords => 2,
+                MatchMode::AnyWords => 3,
+            },
+            case: match self.case {
+                CaseMode::Smart => 0,
+                CaseMode::Sensitive => 1,
+                CaseMode::Insensitive => 2,
+            },
+            whole_word: self.whole_word,
+            granularity: match self.granularity {
+                Granularity::Line => 0,
+                Granularity::Block => 1,
+            },
+            roots: self.roots.clone(),
+        }
+    }
+
+    /// Restore a saved search into the UI and run it.
+    fn apply_saved(&mut self, s: &super::session::SavedSearch) {
+        self.query_text = s.query.clone();
+        self.exclude_text = s.exclude.clone();
+        self.match_mode = match s.match_mode {
+            1 => MatchMode::Regex,
+            2 => MatchMode::AllWords,
+            3 => MatchMode::AnyWords,
+            _ => MatchMode::Substring,
+        };
+        self.case = match s.case {
+            1 => CaseMode::Sensitive,
+            2 => CaseMode::Insensitive,
+            _ => CaseMode::Smart,
+        };
+        self.whole_word = s.whole_word;
+        self.granularity = if s.granularity == 1 {
+            Granularity::Block
+        } else {
+            Granularity::Line
+        };
+        self.roots = s.roots.clone();
+        self.launch_search();
     }
 
     /// Cancel any running search/watch and clear results (without restarting).
@@ -324,6 +389,11 @@ impl App {
         self.highlight = insearch_core::highlight_regex(&query);
         self.searching = true;
         self.watching = false;
+        // Fresh counter + timer for this search.
+        self.scanned = Arc::new(AtomicUsize::new(0));
+        self.search_started = Some(Instant::now());
+        self.search_elapsed = None;
+        self.session.record_query(&self.query_text);
 
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAP);
         self.rx = Some(rx);
@@ -338,8 +408,9 @@ impl App {
             let roots = roots.clone();
             let query = query.clone();
             let generation_counter = generation_counter.clone();
+            let scanned = self.scanned.clone();
             std::thread::spawn(move || {
-                insearch_core::search(&roots, &query, g, generation_counter, opts, tx);
+                insearch_core::search(&roots, &query, g, generation_counter, opts, tx, scanned);
             });
         }
 
@@ -410,6 +481,7 @@ impl App {
                 SearchEvent::Done(g) => {
                     if g == self.active_generation {
                         self.searching = false;
+                        self.search_elapsed = self.search_started.map(|t| t.elapsed());
                         // Initial scan finished — safe to begin watching now.
                         self.start_pending_watch();
                     }
@@ -508,6 +580,80 @@ impl App {
         });
         if changed {
             self.pending_since = Some(Instant::now());
+        }
+    }
+
+    /// Recent-queries and saved-searches toolbar.
+    fn session_bar(&mut self, ui: &mut egui::Ui) {
+        enum Act {
+            Recent(String),
+            Load(usize),
+            Remove(String),
+            Save,
+        }
+        let mut act: Option<Act> = None;
+        ui.horizontal(|ui| {
+            ui.menu_button("🕘 Recent", |ui| {
+                if self.session.recent_queries.is_empty() {
+                    ui.weak("(none yet)");
+                }
+                for q in &self.session.recent_queries {
+                    if ui.button(q).clicked() {
+                        act = Some(Act::Recent(q.clone()));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("★ Saved", |ui| {
+                if self.session.saved.is_empty() {
+                    ui.weak("(none saved)");
+                }
+                for (i, s) in self.session.saved.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.button(&s.name).clicked() {
+                            act = Some(Act::Load(i));
+                            ui.close();
+                        }
+                        if ui.small_button("✖").on_hover_text("Delete").clicked() {
+                            act = Some(Act::Remove(s.name.clone()));
+                            ui.close();
+                        }
+                    });
+                }
+            });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.save_name)
+                    .hint_text("name to save as")
+                    .desired_width(140.0),
+            );
+            if ui.button("Save search").clicked() {
+                act = Some(Act::Save);
+            }
+        });
+
+        match act {
+            Some(Act::Recent(q)) => {
+                self.query_text = q;
+                self.pending_since = Some(Instant::now());
+            }
+            Some(Act::Load(i)) => {
+                let s = self.session.saved[i].clone();
+                self.apply_saved(&s);
+            }
+            Some(Act::Remove(name)) => self.session.remove_saved(&name),
+            Some(Act::Save) => {
+                let name = if self.save_name.trim().is_empty() {
+                    self.query_text.trim().to_string()
+                } else {
+                    self.save_name.trim().to_string()
+                };
+                if !name.is_empty() {
+                    let entry = self.current_saved(name);
+                    self.session.add_saved(entry);
+                    self.save_name.clear();
+                }
+            }
+            None => {}
         }
     }
 
@@ -677,6 +823,9 @@ impl App {
                 self.launch_search();
             }
         });
+
+        // Recent / saved searches.
+        self.session_bar(ui);
     }
 
     fn status_line(&self) -> String {
@@ -684,11 +833,20 @@ impl App {
             return format!("Error: {e}");
         }
         let base = format!("{} match(es)", self.results.len());
+        let scanned = self.scanned.load(Ordering::Relaxed);
+        let elapsed = self
+            .search_elapsed
+            .or_else(|| self.search_started.map(|t| t.elapsed()));
+        let progress = match elapsed {
+            Some(d) => format!(" · {scanned} files in {:.2}s", d.as_secs_f32()),
+            None => String::new(),
+        };
         let more = if self.truncated {
             format!(" (capped at {MAX_RESULTS}; refine query)")
         } else {
             String::new()
         };
+        let base = format!("{base}{progress}");
         let state = if self.searching {
             " — searching…"
         } else if self.watching {

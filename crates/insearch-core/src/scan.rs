@@ -11,7 +11,7 @@
 //! join the previous run.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -336,6 +336,7 @@ pub fn search(
     current_gen: Arc<AtomicU64>,
     opts: ScanOptions,
     tx: Sender<SearchEvent>,
+    scanned: Arc<AtomicUsize>,
 ) {
     let compiled = match build_compiled(query) {
         Ok(c) => Arc::new(c),
@@ -385,6 +386,7 @@ pub fn search(
         let block_splitter = block_splitter.clone();
         let registry = registry.clone();
         let filter = filter.clone();
+        let scanned = scanned.clone();
         Box::new(move |result| {
             // Cancelled? A newer search has started.
             if current_gen.load(Ordering::Relaxed) != generation {
@@ -397,6 +399,7 @@ pub fn search(
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 return WalkState::Continue;
             }
+            scanned.fetch_add(1, Ordering::Relaxed);
             if filter_active && !filter.accepts(&entry) {
                 return WalkState::Continue;
             }
@@ -655,7 +658,8 @@ impl<'a> Sink for MatchSink<'a> {
 pub fn search_collect(roots: &[PathBuf], query: &Query, opts: ScanOptions) -> Vec<Match> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let gen = Arc::new(AtomicU64::new(1));
-    search(roots, query, 1, gen, opts, tx);
+    let scanned = Arc::new(AtomicUsize::new(0));
+    search(roots, query, 1, gen, opts, tx, scanned);
     let mut out = Vec::new();
     for ev in rx.try_iter() {
         if let SearchEvent::Match(_, m) = ev {
