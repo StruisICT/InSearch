@@ -2,6 +2,7 @@
 //!
 //! Usage: `insearch-cli <pattern> <root> [more roots...] [--regex] [--gitignore]`
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -47,8 +48,19 @@ fn main() -> ExitCode {
     };
 
     let hits = search_collect(&roots, &query, opts);
+
+    // Write through a buffered, locked stdout and stop quietly if the reader
+    // closes the pipe (e.g. `insearch-cli ... | head` / `| grep -q`), rather
+    // than panicking like `println!` would.
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
     for m in &hits {
-        println!("{}:{}: {}", m.path.display(), m.line_start, m.text);
+        if writeln!(out, "{}:{}: {}", m.path.display(), m.line_start, m.text).is_err() {
+            return ExitCode::SUCCESS;
+        }
+    }
+    if out.flush().is_err() {
+        return ExitCode::SUCCESS;
     }
     eprintln!("{} match(es).", hits.len());
 
