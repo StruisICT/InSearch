@@ -14,5 +14,5 @@ pub mod watch;
 // modules — `extract::{TextExtractor, Registry}`, `split::{UnitSplitter, ...}` —
 // so this prelude reflects what front-ends actually use.
 pub use model::{Granularity, Match, Mode, Query, SearchEvent};
-pub use scan::{search, search_collect, ScanOptions};
+pub use scan::{search, search_collect, FileFilter, ScanOptions};
 pub use watch::{start as start_watch, WatchHandle};

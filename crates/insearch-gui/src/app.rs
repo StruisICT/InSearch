@@ -17,7 +17,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use insearch_core::model::SearchEvent;
-use insearch_core::{Granularity, Match, Mode, Query, ScanOptions};
+use insearch_core::{FileFilter, Granularity, Match, Mode, Query, ScanOptions};
 
 /// Idle time after the last keystroke before a search fires.
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -28,6 +28,25 @@ const MAX_RESULTS: usize = 10_000;
 /// Bounded channel depth — backpressure against a firehose of matches.
 const CHANNEL_CAP: usize = 4096;
 
+/// Parse a comma/space/semicolon-separated extension list, dropping any leading
+/// dots and lowercasing.
+fn parse_exts(s: &str) -> Vec<String> {
+    s.split([',', ';', ' ', '\t'])
+        .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
+}
+
+/// Parse a size in kibibytes into bytes; empty/invalid → no bound.
+fn parse_kb(s: &str) -> Option<u64> {
+    s.trim().parse::<u64>().ok().map(|kb| kb * 1024)
+}
+
+/// Parse a positive integer; empty/invalid/zero → `None`.
+fn parse_u64(s: &str) -> Option<u64> {
+    s.trim().parse::<u64>().ok().filter(|n| *n > 0)
+}
+
 pub struct App {
     // Query + options
     query_text: String,
@@ -36,6 +55,16 @@ pub struct App {
     mode: Mode,
     respect_gitignore: bool,
     dark: bool,
+
+    // File filters (raw UI text, parsed into a FileFilter on search)
+    show_filters: bool,
+    filter_name: String,
+    filter_name_regex: bool,
+    filter_include_exts: String,
+    filter_exclude_exts: String,
+    filter_min_kb: String,
+    filter_max_kb: String,
+    filter_days: String,
 
     // Roots to search
     roots: Vec<PathBuf>,
@@ -129,6 +158,14 @@ impl App {
             mode: Mode::Live,
             respect_gitignore: false,
             dark,
+            show_filters: false,
+            filter_name: String::new(),
+            filter_name_regex: false,
+            filter_include_exts: String::new(),
+            filter_exclude_exts: String::new(),
+            filter_min_kb: String::new(),
+            filter_max_kb: String::new(),
+            filter_days: String::new(),
             roots: initial_root.into_iter().collect(),
             generation_counter: Arc::new(AtomicU64::new(0)),
             active_generation: 0,
@@ -158,7 +195,20 @@ impl App {
     fn scan_options(&self) -> ScanOptions {
         ScanOptions {
             respect_gitignore: self.respect_gitignore,
+            filter: self.build_filter(),
             ..ScanOptions::default()
+        }
+    }
+
+    fn build_filter(&self) -> FileFilter {
+        FileFilter {
+            name_pattern: self.filter_name.trim().to_string(),
+            name_is_regex: self.filter_name_regex,
+            include_exts: parse_exts(&self.filter_include_exts),
+            exclude_exts: parse_exts(&self.filter_exclude_exts),
+            min_size: parse_kb(&self.filter_min_kb),
+            max_size: parse_kb(&self.filter_max_kb),
+            modified_within_days: parse_u64(&self.filter_days),
         }
     }
 
@@ -306,6 +356,84 @@ impl App {
         }
     }
 
+    /// The collapsible file-filter panel. Any change re-triggers the search.
+    fn filters_ui(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            egui::Grid::new("filters_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Name:");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_name)
+                                    .hint_text("glob e.g. *.log")
+                                    .desired_width(180.0),
+                            )
+                            .changed();
+                        changed |= ui.checkbox(&mut self.filter_name_regex, "regex").changed();
+                    });
+                    ui.end_row();
+
+                    ui.label("Extensions:");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_include_exts)
+                                    .hint_text("include e.g. log,txt")
+                                    .desired_width(120.0),
+                            )
+                            .changed();
+                        ui.label("exclude:");
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_exclude_exts)
+                                    .hint_text("e.g. min.js")
+                                    .desired_width(120.0),
+                            )
+                            .changed();
+                    });
+                    ui.end_row();
+
+                    ui.label("Size (KB):");
+                    ui.horizontal(|ui| {
+                        ui.label("min");
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_min_kb)
+                                    .desired_width(70.0),
+                            )
+                            .changed();
+                        ui.label("max");
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_max_kb)
+                                    .desired_width(70.0),
+                            )
+                            .changed();
+                    });
+                    ui.end_row();
+
+                    ui.label("Modified:");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_days)
+                                    .desired_width(70.0),
+                            )
+                            .changed();
+                        ui.label("within N days (blank = any)");
+                    });
+                    ui.end_row();
+                });
+        });
+        if changed {
+            self.pending_since = Some(Instant::now());
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("InSearch");
@@ -384,7 +512,14 @@ impl App {
             {
                 self.pending_since = Some(Instant::now());
             }
+            ui.separator();
+            ui.toggle_value(&mut self.show_filters, "⚑ Filters");
         });
+
+        // Filters (collapsible).
+        if self.show_filters {
+            self.filters_ui(ui);
+        }
 
         // Roots row.
         ui.horizontal_wrapped(|ui| {

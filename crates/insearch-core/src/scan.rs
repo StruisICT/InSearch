@@ -13,12 +13,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::Sender;
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkMatch};
-use ignore::{WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use crate::extract::{default_registry, Source};
 use crate::model::{Granularity, Match, Query, SearchEvent};
@@ -33,11 +34,13 @@ const MAX_BLOCK_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Options controlling the walk. Sensible defaults for a document/log searcher:
 /// see everything (don't honour `.gitignore`, do descend hidden dirs).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ScanOptions {
     pub respect_gitignore: bool,
     pub include_hidden: bool,
     pub follow_links: bool,
+    /// Restrict which files are searched (name / extension / size / age).
+    pub filter: FileFilter,
 }
 
 impl Default for ScanOptions {
@@ -46,7 +49,147 @@ impl Default for ScanOptions {
             respect_gitignore: false,
             include_hidden: true,
             follow_links: false,
+            filter: FileFilter::default(),
         }
+    }
+}
+
+/// Restricts which files a search visits. Empty fields impose no restriction, so
+/// `FileFilter::default()` matches everything.
+#[derive(Clone, Debug, Default)]
+pub struct FileFilter {
+    /// Match the file *name* against this pattern (glob by default, or a regex
+    /// if `name_is_regex`). Empty = no name filter. Case-insensitive.
+    pub name_pattern: String,
+    pub name_is_regex: bool,
+    /// Lowercase extensions to include (without the dot). Empty = all.
+    pub include_exts: Vec<String>,
+    /// Lowercase extensions to exclude (takes precedence over include).
+    pub exclude_exts: Vec<String>,
+    /// Inclusive size bounds, in bytes.
+    pub min_size: Option<u64>,
+    pub max_size: Option<u64>,
+    /// Only files modified within this many days (None = any age).
+    pub modified_within_days: Option<u64>,
+}
+
+/// Translate a shell-style glob (`*`, `?`) into an anchored, case-insensitive
+/// regex source. All other characters are treated literally.
+fn glob_to_regex(glob: &str) -> String {
+    let mut re = String::from("(?i)^");
+    for ch in glob.chars() {
+        match ch {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    re.push('$');
+    re
+}
+
+/// A [`FileFilter`] with its name pattern compiled and its age bound resolved to
+/// an absolute time, ready to test candidate files.
+struct CompiledFilter {
+    name: Option<regex::Regex>,
+    include_exts: Vec<String>,
+    exclude_exts: Vec<String>,
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    modified_after: Option<SystemTime>,
+}
+
+impl CompiledFilter {
+    fn new(f: &FileFilter, now: SystemTime) -> Self {
+        let name = if f.name_pattern.is_empty() {
+            None
+        } else {
+            let src = if f.name_is_regex {
+                format!("(?i){}", f.name_pattern)
+            } else {
+                glob_to_regex(&f.name_pattern)
+            };
+            regex::Regex::new(&src).ok()
+        };
+        let modified_after = f
+            .modified_within_days
+            .map(|d| now - Duration::from_secs(d.saturating_mul(86_400)));
+        CompiledFilter {
+            name,
+            include_exts: f.include_exts.clone(),
+            exclude_exts: f.exclude_exts.clone(),
+            min_size: f.min_size,
+            max_size: f.max_size,
+            modified_after,
+        }
+    }
+
+    /// Whether any check is active — lets the walker skip work when unfiltered.
+    fn is_active(&self) -> bool {
+        self.name.is_some()
+            || !self.include_exts.is_empty()
+            || !self.exclude_exts.is_empty()
+            || self.min_size.is_some()
+            || self.max_size.is_some()
+            || self.modified_after.is_some()
+    }
+
+    fn needs_metadata(&self) -> bool {
+        self.min_size.is_some() || self.max_size.is_some() || self.modified_after.is_some()
+    }
+
+    /// Does this file pass the filter?
+    fn accepts(&self, entry: &DirEntry) -> bool {
+        let path = entry.path();
+
+        // Extension include/exclude (cheap, from the path).
+        if !self.include_exts.is_empty() || !self.exclude_exts.is_empty() {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if self.exclude_exts.contains(&ext) {
+                return false;
+            }
+            if !self.include_exts.is_empty() && !self.include_exts.contains(&ext) {
+                return false;
+            }
+        }
+
+        // Name pattern.
+        if let Some(re) = &self.name {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !re.is_match(name) {
+                return false;
+            }
+        }
+
+        // Size / age (needs a stat, so only when those bounds are set).
+        if self.needs_metadata() {
+            let md = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            let size = md.len();
+            if self.min_size.is_some_and(|min| size < min) {
+                return false;
+            }
+            if self.max_size.is_some_and(|max| size > max) {
+                return false;
+            }
+            if let Some(after) = self.modified_after {
+                match md.modified() {
+                    Ok(m) if m >= after => {}
+                    _ => return false,
+                }
+            }
+        }
+
+        true
     }
 }
 
@@ -111,6 +254,10 @@ pub fn search(
     // Extractor registry: plain-text files search in place; binary formats
     // (pdf/xls/docx, when their features are enabled) decode to text first.
     let registry = Arc::new(default_registry());
+    // File filter (name / extension / size / age), compiled once per search.
+    let now = SystemTime::now();
+    let filter = Arc::new(CompiledFilter::new(&opts.filter, now));
+    let filter_active = filter.is_active();
 
     let walker = builder.build_parallel();
     walker.run(|| {
@@ -119,6 +266,7 @@ pub fn search(
         let current_gen = current_gen.clone();
         let block_splitter = block_splitter.clone();
         let registry = registry.clone();
+        let filter = filter.clone();
         Box::new(move |result| {
             // Cancelled? A newer search has started.
             if current_gen.load(Ordering::Relaxed) != generation {
@@ -129,6 +277,9 @@ pub fn search(
                 Err(_) => return WalkState::Continue,
             };
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                return WalkState::Continue;
+            }
+            if filter_active && !filter.accepts(&entry) {
                 return WalkState::Continue;
             }
             let path = entry.path().to_path_buf();
@@ -452,6 +603,61 @@ mod tests {
         assert_eq!(hits[0].line_end, 3);
         assert_eq!(hits[0].matched_line, 3);
         assert!(hits[0].text.contains("boom") && hits[0].text.contains("caused by"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_translation_matches_expected_names() {
+        let re = regex::Regex::new(&glob_to_regex("*.log")).unwrap();
+        assert!(re.is_match("app.log"));
+        assert!(re.is_match("APP.LOG")); // case-insensitive
+        assert!(!re.is_match("app.txt"));
+        let re2 = regex::Regex::new(&glob_to_regex("data?.json")).unwrap();
+        assert!(re2.is_match("data1.json"));
+        assert!(!re2.is_match("data12.json")); // ? is exactly one char
+    }
+
+    #[test]
+    fn file_filter_restricts_by_extension() {
+        let dir = tmpdir();
+        write(&dir, "a.log", "hello ERROR\n");
+        write(&dir, "b.txt", "hello ERROR\n");
+        write(&dir, "notes.md", "ERROR here\n");
+        let opts = ScanOptions {
+            filter: FileFilter {
+                include_exts: vec!["log".into(), "txt".into()],
+                ..FileFilter::default()
+            },
+            ..ScanOptions::default()
+        };
+        let q = Query::literal("ERROR");
+        let hits = search_collect(std::slice::from_ref(&dir), &q, opts);
+        let names: Vec<String> = hits
+            .iter()
+            .filter_map(|m| m.path.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .collect();
+        assert!(names.iter().any(|n| n == "a.log"));
+        assert!(names.iter().any(|n| n == "b.txt"));
+        assert!(!names.iter().any(|n| n == "notes.md"), "names: {names:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_filter_by_name_glob() {
+        let dir = tmpdir();
+        write(&dir, "server.log", "ERROR boot\n");
+        write(&dir, "client.log", "ERROR boot\n");
+        let opts = ScanOptions {
+            filter: FileFilter {
+                name_pattern: "server.*".into(),
+                ..FileFilter::default()
+            },
+            ..ScanOptions::default()
+        };
+        let q = Query::literal("ERROR");
+        let hits = search_collect(std::slice::from_ref(&dir), &q, opts);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with("server.log"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
