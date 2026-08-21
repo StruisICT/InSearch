@@ -1,23 +1,22 @@
 name: winget manifest
 
-# Right after a release, generate the winget manifest folder for that version and
-# open a PR that adds it to THIS repo. It never touches microsoft/winget-pkgs —
-# submitting there stays a deliberate manual step (fork + copy the folder + PR).
+# Generate the winget manifest folder for a released version and open a PR that
+# adds it to THIS repo. It never touches microsoft/winget-pkgs — submitting there
+# stays a deliberate manual step (fork + copy the folder + PR).
 #
-# A Release published by release-please via GITHUB_TOKEN may not start this
-# workflow, so a manual workflow_dispatch with the version is the reliable path.
+# Manual trigger only: the release MSI is attached by build.yml (also on the tag),
+# which races the `release: published` event, so auto-running here would download
+# a not-yet-attached asset. Run this once the release assets are up.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Released version to generate the manifest for (e.g. 0.2.0)"
+        description: "Released version to generate the manifest for (e.g. 0.2.1)"
         required: true
         default: ""
 
 concurrency:
-  group: winget-manifest-${{ github.event.release.tag_name || github.event.inputs.version }}
+  group: winget-manifest-${{ github.event.inputs.version }}
   cancel-in-progress: false
 
 permissions:
