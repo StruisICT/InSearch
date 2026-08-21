@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/StruisICT/InSearch/compare/v0.1.1...v0.2.0) (2026-08-20)
+
+
+### Features
+
+* **gui:** bundled app icon ([98101b9](https://github.com/StruisICT/InSearch/commit/98101b901ba02192b075d6882a25f6ce1d841f9d))
+* **gui:** focus the search box when launched with a folder ([b119434](https://github.com/StruisICT/InSearch/commit/b119434366e9f54bec2143a247aa0313416e4515))
+* **ui:** sleeker ClutterCutter-inspired theme ([fe3921d](https://github.com/StruisICT/InSearch/commit/fe3921de6325de92a81e34a397876be096b83e2d))
+
 ## [0.1.1](https://github.com/StruisICT/InSearch/compare/v0.1.0...v0.1.1) (2026-08-20)
 
 
