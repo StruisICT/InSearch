@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: write # attach assets to releases on tags
+  actions: read # SignPath downloads the build artifact via the Actions API
 
 jobs:
   check:
@@ -39,6 +40,43 @@ jobs:
 
       - name: Build release
         run: cargo build --release -p insearch-gui -p insearch-cli
+
+      # ---------- Code signing (SignPath Foundation — free, forever, for OSS) ----------
+      # Inert until configured: set repo variable ENABLE_SIGNING=true, the SignPath
+      # org/project/policy/artifact-config variables, and the SIGNPATH_API_TOKEN secret
+      # (see AGENTS.md "Code signing"). Runs only on release tags, so PR/main builds stay
+      # fast and need no secrets. The exes are signed here; the MSI is built from the
+      # signed exes and signed too, so the downloaded installer stops tripping SmartScreen.
+      - name: Upload unsigned exes (for signing)
+        id: upload_exes
+        if: vars.ENABLE_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exes
+          path: |
+            target/release/insearch-gui.exe
+            target/release/insearch-cli.exe
+
+      - name: Sign exes (SignPath)
+        id: sign_exes
+        if: vars.ENABLE_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_EXE_ARTIFACT_CONFIG_SLUG }}
+          github-artifact-id: ${{ steps.upload_exes.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exes
+
+      - name: Use signed exes
+        if: steps.sign_exes.outcome == 'success'
+        shell: bash
+        run: |
+          cp signed-exes/insearch-gui.exe target/release/insearch-gui.exe
+          cp signed-exes/insearch-cli.exe target/release/insearch-cli.exe
 
       - name: Smoke-test CLI
         shell: bash
@@ -67,6 +105,34 @@ jobs:
           binp=$(dirname "$candle")
           cargo wix -p insearch-gui --no-build -i "$ver" -b "$binp" -o "dist/InSearch-$ver-x86_64.msi"
           ls -la dist/*.msi
+
+      # Sign the MSI too (built from the signed exes above).
+      - name: Upload unsigned MSI (for signing)
+        id: upload_msi
+        if: vars.ENABLE_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-msi
+          path: dist/*.msi
+
+      - name: Sign MSI (SignPath)
+        id: sign_msi
+        if: vars.ENABLE_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_MSI_ARTIFACT_CONFIG_SLUG }}
+          github-artifact-id: ${{ steps.upload_msi.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-msi
+
+      - name: Use signed MSI
+        if: steps.sign_msi.outcome == 'success'
+        shell: bash
+        run: cp signed-msi/*.msi "$(ls dist/*.msi)"
 
       - uses: actions/upload-artifact@v4
         with:

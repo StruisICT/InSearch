@@ -77,10 +77,28 @@ GUI and CLI enable `all-formats`; core's default build stays lean.
 
 ## CI
 
-`.github/workflows/`: `build.yml` (Windows — fmt/clippy/test gate + release exe
-+ CLI smoke + artifact/release-attach), `linux.yml` (portable tarball, installs
-GTK/wayland/x11/GL), `release-please.yml` (simple release-type → tags vX.Y.Z that
-trigger the build workflows).
+`.github/workflows/`: `build.yml` (Windows — fmt/clippy/test gate + release exe +
+MSI + CLI smoke + artifact/release-attach), `linux.yml` (portable tarball,
+installs GTK/wayland/x11/GL), `release-please.yml` (simple release-type → tags
+vX.Y.Z that trigger the build workflows), `winget-manifest.yml` (generate the
+winget manifest + open an in-repo PR after a release).
+
+## Code signing (removes the SmartScreen warning)
+
+Unsigned downloads trip Windows SmartScreen ("Windows protected your PC"). The
+Windows job signs the exes **and** the MSI via [SignPath Foundation](https://signpath.org)
+(free for open source) — inert until configured. To turn it on:
+
+1. In SignPath, add an **InSearch** project under the Struis ICT org, a
+   release **signing policy**, and two **artifact configurations** (one for the
+   exes, one for the MSI — both Authenticode).
+2. Add repo **variables**: `ENABLE_SIGNING=true`, `SIGNPATH_ORGANIZATION_ID`,
+   `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`,
+   `SIGNPATH_EXE_ARTIFACT_CONFIG_SLUG`, `SIGNPATH_MSI_ARTIFACT_CONFIG_SLUG`.
+3. Add repo **secret** `SIGNPATH_API_TOKEN`.
+
+Signing runs only on release tags. The winget manifest's SHA256 is computed from
+the published (signed) MSI, so it stays correct automatically.
 
 ## Status
 
