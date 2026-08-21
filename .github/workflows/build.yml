@@ -53,13 +53,30 @@ jobs:
           cp target/release/insearch-gui.exe "dist/InSearch.exe"
           cp target/release/insearch-cli.exe "dist/insearch-cli.exe"
 
+      # Build the MSI only on release tags (it needs WiX + cargo-wix).
+      - name: Build MSI installer
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          cargo install cargo-wix --version 0.3.9 --locked
+          # WiX v3 (candle/light) is pre-installed on windows runners; install if not.
+          candle=$(find "/c/Program Files (x86)" -name candle.exe 2>/dev/null | head -1 || true)
+          if [ -z "$candle" ]; then choco install wixtoolset --no-progress -y; candle=$(find "/c/Program Files (x86)" -name candle.exe 2>/dev/null | head -1); fi
+          binp=$(dirname "$candle")
+          cargo wix -p insearch-gui --no-build -i "$ver" -b "$binp" -o "dist/InSearch-$ver-x86_64.msi"
+          ls -la dist/*.msi
+
       - uses: actions/upload-artifact@v4
         with:
           name: insearch-windows
-          path: dist/*.exe
+          path: dist/*
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.exe
+          files: |
+            dist/*.exe
+            dist/*.msi
