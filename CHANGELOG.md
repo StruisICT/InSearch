@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/StruisICT/InSearch/compare/v0.2.0...v0.2.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **cli:** exit 0 when showing usage (no args) ([f32e53d](https://github.com/StruisICT/InSearch/commit/f32e53d836c394ce42b14a660e611fb04a84fb26))
+
 ## [0.2.0](https://github.com/StruisICT/InSearch/compare/v0.1.1...v0.2.0) (2026-08-20)
 
 
