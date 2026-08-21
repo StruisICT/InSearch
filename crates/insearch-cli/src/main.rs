@@ -11,6 +11,8 @@ use insearch_core::{search_collect, Query, ScanOptions};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+        // Showing usage is a successful outcome (exit 0) — running with no args
+        // just prints help; it isn't an error.
         eprintln!(
             "InSearch CLI\n\n\
              Usage: insearch-cli <pattern> <root> [more roots...] [--regex] [--gitignore]\n\n\
@@ -18,7 +20,7 @@ fn main() -> ExitCode {
              \t--regex      treat <pattern> as a regular expression\n\
              \t--gitignore  honour .gitignore / hidden-file rules (default: search everything)"
         );
-        return ExitCode::from(2);
+        return ExitCode::SUCCESS;
     }
 
     let mut pattern: Option<String> = None;
