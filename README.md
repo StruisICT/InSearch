@@ -75,3 +75,7 @@ See [`AGENTS.md`](AGENTS.md) for architecture and conventions.
 ## License
 
 MIT © Struis ICT
+
+---
+
+© Struis ICT — <https://struisict.com> · [Buy me a coffee ☕](https://buymeacoffee.com/struis112)

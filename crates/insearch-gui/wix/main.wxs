@@ -1,0 +1,106 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!-- WiX source for the InSearch MSI. Installs the GUI (as InSearch.exe) and the
+     CLI to "Program Files\InSearch", a Start-menu shortcut, and (optionally)
+     adds the folder to PATH for the CLI. The Explorer context menu stays opt-in
+     via the app's Settings panel (HKCU), so it isn't touched here. -->
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+    <Product
+        Id='*'
+        Name='InSearch'
+        UpgradeCode='BBFA7635-7937-46E8-88F8-49BF26956F43'
+        Manufacturer='Struis ICT'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='InSearch — real-time content-aware file search'
+            Manufacturer='Struis ICT'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252' />
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.' />
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1' />
+        <Property Id='DiskPrompt' Value='InSearch Installation' />
+
+        <Icon Id='ProductICO' SourceFile='crates\insearch-gui\app.ico' />
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
+        <Property Id='ARPHELPLINK' Value='https://struisict.com' />
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='InSearch'>
+                    <Component Id='License' Guid='*'>
+                        <File Id='LicenseFile' DiskId='1' Source='crates\insearch-gui\wix\License.rtf' KeyPath='yes' />
+                    </Component>
+                    <Component Id='GuiExe' Guid='*'>
+                        <File Id='InSearchExe' Name='InSearch.exe' DiskId='1'
+                            Source='$(var.CargoTargetBinDir)\insearch-gui.exe' KeyPath='yes' />
+                    </Component>
+                    <Component Id='CliExe' Guid='*'>
+                        <File Id='InSearchCliExe' Name='insearch-cli.exe' DiskId='1'
+                            Source='$(var.CargoTargetBinDir)\insearch-cli.exe' KeyPath='yes' />
+                    </Component>
+                    <Component Id='Path' Guid='B3926B59-52FC-46FE-8C17-80B440FC05B6' KeyPath='yes'>
+                        <Environment Id='PATH' Name='PATH' Value='[APPLICATIONFOLDER]'
+                            Permanent='no' Part='last' Action='set' System='yes' />
+                    </Component>
+                </Directory>
+            </Directory>
+            <Directory Id='ProgramMenuFolder'>
+                <Component Id='StartMenuShortcut' Guid='*'>
+                    <Shortcut Id='InSearchShortcut' Name='InSearch'
+                        Description='Real-time content-aware file search'
+                        Target='[APPLICATIONFOLDER]InSearch.exe'
+                        WorkingDirectory='APPLICATIONFOLDER' Icon='ProductICO' />
+                    <RegistryValue Root='HKCU' Key='Software\Struis ICT\InSearch'
+                        Name='installed' Type='integer' Value='1' KeyPath='yes' />
+                </Component>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='InSearch'
+            Description='Installs the InSearch GUI and CLI.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='License' />
+            <ComponentRef Id='GuiExe' />
+            <ComponentRef Id='CliExe' />
+            <ComponentRef Id='StartMenuShortcut' />
+
+            <Feature
+                Id='Environment'
+                Title='PATH Environment Variable'
+                Description='Add InSearch to PATH so insearch-cli can be run from any location.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='Path' />
+            </Feature>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize' />
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree' />
+        </UI>
+        <WixVariable Id='WixUILicenseRtf' Value='crates\insearch-gui\wix\License.rtf' />
+    </Product>
+</Wix>
