@@ -7,10 +7,11 @@
 //!   * `ui` drains the results channel each frame and repaints while a
 //!     search is live.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -47,6 +48,101 @@ fn parse_kb(s: &str) -> Option<u64> {
 /// Parse a positive integer; empty/invalid/zero → `None`.
 fn parse_u64(s: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok().filter(|n| *n > 0)
+}
+
+/// Days since the Unix epoch for a civil (proleptic Gregorian) date, and its
+/// inverse — Howard Hinnant's `days_from_civil` / `civil_from_days`. Keeps date
+/// handling dependency-free (no chrono) for the filter + Modified column.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = m as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Parse a `YYYY-MM-DD` date into a `SystemTime` at UTC midnight; blank/invalid
+/// → `None`.
+fn parse_date(s: &str) -> Option<SystemTime> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut it = s.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let mo: u32 = it.next()?.parse().ok()?;
+    let d: u32 = it.next()?.parse().ok()?;
+    if it.next().is_some() || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let days = days_from_civil(y, mo, d);
+    if days < 0 {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::from_secs(days as u64 * 86_400))
+}
+
+/// Human-readable byte size (e.g. `4.2 KB`).
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
+}
+
+/// Format a modification time as `(date, date + time)`, both UTC.
+fn format_mtime(t: SystemTime) -> (String, String) {
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
+    let rem = secs.rem_euclid(86_400);
+    let (hh, mi) = (rem / 3600, (rem % 3600) / 60);
+    let date = format!("{y:04}-{mo:02}-{d:02}");
+    let full = format!("{date} {hh:02}:{mi:02} UTC");
+    (date, full)
+}
+
+/// How the results list is rendered.
+#[derive(Clone, Copy, PartialEq)]
+enum ResultView {
+    /// File · Line · Match.
+    Compact,
+    /// Adds Folder · Size · Modified columns.
+    Detailed,
+}
+
+/// Cached filesystem metadata for a path, formatted for display once.
+#[derive(Clone, Default)]
+struct FileMeta {
+    dir_display: String,
+    size_label: String,
+    modified_label: String,
+    modified_hover: String,
 }
 
 /// Export file formats for the results list.
@@ -126,6 +222,8 @@ pub struct App {
     filter_min_kb: String,
     filter_max_kb: String,
     filter_days: String,
+    filter_after: String,
+    filter_before: String,
 
     // Roots to search
     roots: Vec<PathBuf>,
@@ -138,6 +236,10 @@ pub struct App {
     watching: bool,
     watch_handle: Option<insearch_core::WatchHandle>,
     results: Vec<ResultRow>,
+    /// How the results table is rendered (compact vs. detailed).
+    view: ResultView,
+    /// Per-path filesystem metadata (size/modified), computed once per search.
+    meta_cache: HashMap<PathBuf, FileMeta>,
     truncated: bool,
     error: Option<String>,
     /// Compiled from the active query to highlight matches in result previews.
@@ -187,42 +289,14 @@ struct ResultRow {
     path: PathBuf,
     file_name: String,
     path_display: String,
+    dir_display: String,
+    size_label: String,
+    modified_label: String,
+    modified_hover: String,
     line_label: String,
     line_hover: Option<String>,
     preview: String,
     full_text: String,
-}
-
-impl ResultRow {
-    fn from_match(m: Match) -> Self {
-        let file_name = m
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let path_display = m.path.display().to_string();
-        // A multi-line block match shows a line range and a "match on line N"
-        // hover; a single-line match shows just the number.
-        let (line_label, line_hover) = if m.line_end > m.line_start {
-            (
-                format!("{}-{}", m.line_start, m.line_end),
-                Some(format!("match on line {}", m.matched_line)),
-            )
-        } else {
-            (m.line_start.to_string(), None)
-        };
-        // Collapse newlines so a block occupies one virtualized row.
-        let preview = m.text.replace(['\r', '\n'], " ⏎ ");
-        ResultRow {
-            path: m.path,
-            file_name,
-            path_display,
-            line_label,
-            line_hover,
-            preview,
-            full_text: m.text,
-        }
-    }
 }
 
 impl App {
@@ -251,6 +325,8 @@ impl App {
             filter_min_kb: String::new(),
             filter_max_kb: String::new(),
             filter_days: String::new(),
+            filter_after: String::new(),
+            filter_before: String::new(),
             roots: initial_root.into_iter().collect(),
             generation_counter: Arc::new(AtomicU64::new(0)),
             active_generation: 0,
@@ -259,6 +335,8 @@ impl App {
             watching: false,
             watch_handle: None,
             results: Vec::new(),
+            view: ResultView::Compact,
+            meta_cache: HashMap::new(),
             truncated: false,
             error: None,
             highlight: None,
@@ -304,6 +382,72 @@ impl App {
             min_size: parse_kb(&self.filter_min_kb),
             max_size: parse_kb(&self.filter_max_kb),
             modified_within_days: parse_u64(&self.filter_days),
+            modified_after: parse_date(&self.filter_after),
+            // Make "before" inclusive of the whole named day.
+            modified_before: parse_date(&self.filter_before)
+                .map(|t| t + Duration::from_secs(86_400)),
+        }
+    }
+
+    /// Build (once, cached) the display metadata for a result's file.
+    fn file_meta(&mut self, path: &Path) -> FileMeta {
+        if let Some(m) = self.meta_cache.get(path) {
+            return m.clone();
+        }
+        let dir_display = path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let (size_label, modified_label, modified_hover) = match std::fs::metadata(path) {
+            Ok(md) => {
+                let (date, full) = md.modified().ok().map(format_mtime).unwrap_or_default();
+                (human_size(md.len()), date, full)
+            }
+            Err(_) => (String::new(), String::new(), String::new()),
+        };
+        let meta = FileMeta {
+            dir_display,
+            size_label,
+            modified_label,
+            modified_hover,
+        };
+        self.meta_cache.insert(path.to_path_buf(), meta.clone());
+        meta
+    }
+
+    /// Build a display row from a raw match, filling in cached file metadata.
+    fn make_row(&mut self, m: Match) -> ResultRow {
+        let file_name = m
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path_display = m.path.display().to_string();
+        // A multi-line block match shows a line range and a "match on line N"
+        // hover; a single-line match shows just the number.
+        let (line_label, line_hover) = if m.line_end > m.line_start {
+            (
+                format!("{}-{}", m.line_start, m.line_end),
+                Some(format!("match on line {}", m.matched_line)),
+            )
+        } else {
+            (m.line_start.to_string(), None)
+        };
+        // Collapse newlines so a block occupies one virtualized row.
+        let preview = m.text.replace(['\r', '\n'], " ⏎ ");
+        let meta = self.file_meta(&m.path);
+        ResultRow {
+            path: m.path,
+            file_name,
+            path_display,
+            dir_display: meta.dir_display,
+            size_label: meta.size_label,
+            modified_label: meta.modified_label,
+            modified_hover: meta.modified_hover,
+            line_label,
+            line_hover,
+            preview,
+            full_text: m.text,
         }
     }
 
@@ -389,6 +533,7 @@ impl App {
         let g = self.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
         self.active_generation = g;
         self.results.clear();
+        self.meta_cache.clear();
         self.truncated = false;
         self.error = None;
         self.status_notice = None;
@@ -469,7 +614,8 @@ impl App {
                 SearchEvent::Match(g, m) => {
                     if g == self.active_generation {
                         if self.results.len() < MAX_RESULTS {
-                            self.results.push(ResultRow::from_match(m));
+                            let row = self.make_row(m);
+                            self.results.push(row);
                         } else {
                             self.truncated = true;
                         }
@@ -580,6 +726,29 @@ impl App {
                             )
                             .changed();
                         ui.label("within N days (blank = any)");
+                    });
+                    ui.end_row();
+
+                    ui.label("Date range:");
+                    ui.horizontal(|ui| {
+                        ui.label("after");
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_after)
+                                    .hint_text("YYYY-MM-DD")
+                                    .desired_width(100.0),
+                            )
+                            .on_hover_text("Only files modified on/after this date")
+                            .changed();
+                        ui.label("before");
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.filter_before)
+                                    .hint_text("YYYY-MM-DD")
+                                    .desired_width(100.0),
+                            )
+                            .on_hover_text("Only files modified on/before this date")
+                            .changed();
                     });
                     ui.end_row();
                 });
@@ -968,6 +1137,12 @@ impl App {
                 clear = true;
             }
             ui.separator();
+            ui.label("View:");
+            ui.selectable_value(&mut self.view, ResultView::Compact, "Compact")
+                .on_hover_text("File · Line · Match");
+            ui.selectable_value(&mut self.view, ResultView::Detailed, "Detailed")
+                .on_hover_text("Adds Folder · Size · Modified columns");
+            ui.separator();
             ui.menu_button("Export ▾", |ui| {
                 if ui.button("CSV").clicked() {
                     export = Some(ExportFormat::Csv);
@@ -1073,20 +1248,57 @@ impl App {
         }
     }
 
+    /// The currently-visible results as `path:line: text` lines (for the
+    /// clipboard "Copy all results" action).
+    fn all_results_text(&self) -> String {
+        let mut s = String::new();
+        for i in self.visible_indices() {
+            let r = &self.results[i];
+            s.push_str(&format!(
+                "{}:{}: {}\n",
+                r.path_display, r.line_label, r.full_text
+            ));
+        }
+        s
+    }
+
     fn results_table(&self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size + 6.0;
-        TableBuilder::new(ui)
+        let detailed = self.view == ResultView::Detailed;
+        let link = super::palette::palette(self.dark).blue;
+
+        let mut builder = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
-            .column(Column::auto().at_least(160.0)) // file
-            .column(Column::auto().at_least(48.0)) // line
-            .column(Column::remainder()) // text
+            .column(Column::auto().at_least(160.0)); // File
+        if detailed {
+            builder = builder
+                .column(Column::auto().at_least(150.0)) // Folder
+                .column(Column::auto().at_least(64.0)) // Size
+                .column(Column::auto().at_least(96.0)); // Modified
+        }
+        builder = builder
+            .column(Column::auto().at_least(48.0)) // Line
+            .column(Column::remainder()); // Match
+
+        builder
             .header(20.0, |mut header| {
                 header.col(|ui| {
                     ui.strong("File");
                 });
+                if detailed {
+                    header.col(|ui| {
+                        ui.strong("Folder");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Size");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Modified");
+                    });
+                }
                 header.col(|ui| {
                     ui.strong("Line");
                 });
@@ -1097,9 +1309,34 @@ impl App {
             .body(|body| {
                 body.rows(text_height, visible.len(), |mut row| {
                     let r = &self.results[visible[row.index()]];
+                    // Double-clicking the file name (or the row) opens the file.
+                    let mut open = false;
+
                     row.col(|ui| {
-                        ui.label(&r.file_name).on_hover_text(&r.path_display);
+                        let resp = ui
+                            .add(
+                                egui::Label::new(egui::RichText::new(&r.file_name).color(link))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text(format!("{}\n(double-click to open)", r.path_display));
+                        if resp.double_clicked() {
+                            open = true;
+                        }
                     });
+                    if detailed {
+                        row.col(|ui| {
+                            ui.label(&r.dir_display).on_hover_text(&r.path_display);
+                        });
+                        row.col(|ui| {
+                            ui.label(&r.size_label);
+                        });
+                        row.col(|ui| {
+                            let resp = ui.label(&r.modified_label);
+                            if !r.modified_hover.is_empty() {
+                                resp.on_hover_text(&r.modified_hover);
+                            }
+                        });
+                    }
                     row.col(|ui| {
                         let resp = ui.monospace(&r.line_label);
                         if let Some(hover) = &r.line_hover {
@@ -1119,6 +1356,9 @@ impl App {
                     // Row-level actions: double-click opens; right-click menu.
                     let resp = row.response();
                     if resp.double_clicked() {
+                        open = true;
+                    }
+                    if open {
                         super::reveal::open_path(&r.path);
                     }
                     resp.context_menu(|ui| {
@@ -1130,12 +1370,29 @@ impl App {
                             super::reveal::reveal(&r.path);
                             ui.close();
                         }
+                        ui.separator();
                         if ui.button("Copy path").clicked() {
                             ui.ctx().copy_text(r.path_display.clone());
                             ui.close();
                         }
                         if ui.button("Copy matched text").clicked() {
                             ui.ctx().copy_text(r.full_text.clone());
+                            ui.close();
+                        }
+                        if ui.button("Copy result (path:line: text)").clicked() {
+                            ui.ctx().copy_text(format!(
+                                "{}:{}: {}",
+                                r.path_display, r.line_label, r.full_text
+                            ));
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Copy all results")
+                            .on_hover_text("Every row currently shown")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(self.all_results_text());
                             ui.close();
                         }
                     });
@@ -1213,5 +1470,51 @@ impl eframe::App for App {
         } else if self.watching {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn civil_days_round_trip() {
+        // Epoch anchor and a few known dates.
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // Round-trip across a leap day and a century boundary.
+        for (y, m, d) in [(2000, 2, 29), (2020, 12, 31), (1999, 7, 4), (2026, 8, 22)] {
+            let days = days_from_civil(y, m, d);
+            assert_eq!(civil_from_days(days), (y, m, d), "for {y}-{m}-{d}");
+        }
+    }
+
+    #[test]
+    fn parse_date_accepts_iso_and_rejects_junk() {
+        assert_eq!(parse_date(""), None);
+        assert_eq!(parse_date("not-a-date"), None);
+        assert_eq!(parse_date("2026-13-01"), None); // bad month
+        assert_eq!(parse_date("2026-08"), None); // too few parts
+        assert_eq!(parse_date("2026-08-01-1"), None); // too many parts
+        let t = parse_date("1970-01-02").expect("valid date");
+        assert_eq!(
+            t.duration_since(UNIX_EPOCH).unwrap(),
+            Duration::from_secs(86_400)
+        );
+    }
+
+    #[test]
+    fn human_size_scales_units() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn format_mtime_is_utc_epoch() {
+        let (date, full) = format_mtime(UNIX_EPOCH);
+        assert_eq!(date, "1970-01-01");
+        assert_eq!(full, "1970-01-01 00:00 UTC");
     }
 }

@@ -69,8 +69,13 @@ pub struct FileFilter {
     /// Inclusive size bounds, in bytes.
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
-    /// Only files modified within this many days (None = any age).
+    /// Only files modified within this many days (None = any age). A relative
+    /// window; combined with `modified_after` by taking the later bound.
     pub modified_within_days: Option<u64>,
+    /// Absolute lower bound: only files modified at/after this instant.
+    pub modified_after: Option<SystemTime>,
+    /// Absolute upper bound: only files modified at/before this instant.
+    pub modified_before: Option<SystemTime>,
 }
 
 /// Translate a shell-style glob (`*`, `?`) into an anchored, case-insensitive
@@ -97,6 +102,7 @@ struct CompiledFilter {
     min_size: Option<u64>,
     max_size: Option<u64>,
     modified_after: Option<SystemTime>,
+    modified_before: Option<SystemTime>,
 }
 
 impl CompiledFilter {
@@ -111,9 +117,16 @@ impl CompiledFilter {
             };
             regex::Regex::new(&src).ok()
         };
-        let modified_after = f
+        // The relative "within N days" window and the absolute lower bound are
+        // both lower bounds on modification time; the effective floor is the
+        // later (more restrictive) of the two.
+        let days_after = f
             .modified_within_days
             .map(|d| now - Duration::from_secs(d.saturating_mul(86_400)));
+        let modified_after = match (days_after, f.modified_after) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
         CompiledFilter {
             name,
             include_exts: f.include_exts.clone(),
@@ -121,6 +134,7 @@ impl CompiledFilter {
             min_size: f.min_size,
             max_size: f.max_size,
             modified_after,
+            modified_before: f.modified_before,
         }
     }
 
@@ -132,10 +146,14 @@ impl CompiledFilter {
             || self.min_size.is_some()
             || self.max_size.is_some()
             || self.modified_after.is_some()
+            || self.modified_before.is_some()
     }
 
     fn needs_metadata(&self) -> bool {
-        self.min_size.is_some() || self.max_size.is_some() || self.modified_after.is_some()
+        self.min_size.is_some()
+            || self.max_size.is_some()
+            || self.modified_after.is_some()
+            || self.modified_before.is_some()
     }
 
     /// Does this file pass the filter?
@@ -181,10 +199,16 @@ impl CompiledFilter {
             if self.max_size.is_some_and(|max| size > max) {
                 return false;
             }
-            if let Some(after) = self.modified_after {
-                match md.modified() {
-                    Ok(m) if m >= after => {}
-                    _ => return false,
+            if self.modified_after.is_some() || self.modified_before.is_some() {
+                let m = match md.modified() {
+                    Ok(m) => m,
+                    Err(_) => return false,
+                };
+                if self.modified_after.is_some_and(|after| m < after) {
+                    return false;
+                }
+                if self.modified_before.is_some_and(|before| m > before) {
+                    return false;
                 }
             }
         }
@@ -779,6 +803,49 @@ mod tests {
         assert!(names.iter().any(|n| n == "a.log"));
         assert!(names.iter().any(|n| n == "b.txt"));
         assert!(!names.iter().any(|n| n == "notes.md"), "names: {names:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_filter_by_absolute_date() {
+        let dir = tmpdir();
+        write(&dir, "now.log", "ERROR fresh\n"); // mtime ≈ now
+        let q = Query::literal("ERROR");
+        let count = |f: FileFilter| {
+            let opts = ScanOptions {
+                filter: f,
+                ..ScanOptions::default()
+            };
+            search_collect(std::slice::from_ref(&dir), &q, opts).len()
+        };
+
+        // 2000-01-01 UTC — comfortably before the just-written file.
+        let past = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+        let future = SystemTime::now() + Duration::from_secs(86_400 * 3650);
+
+        // "before a past date" excludes it; "after a past date" includes it.
+        assert_eq!(
+            count(FileFilter {
+                modified_before: Some(past),
+                ..FileFilter::default()
+            }),
+            0
+        );
+        assert_eq!(
+            count(FileFilter {
+                modified_after: Some(past),
+                ..FileFilter::default()
+            }),
+            1
+        );
+        // "after a far-future date" excludes it.
+        assert_eq!(
+            count(FileFilter {
+                modified_after: Some(future),
+                ..FileFilter::default()
+            }),
+            0
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
