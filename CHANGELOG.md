@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/StruisICT/InSearch/compare/v0.2.1...v0.2.2) (2026-08-22)
+
+
+### Bug Fixes
+
+* **gui:** exit cleanly when the window/OpenGL context can't be created ([3f4d6e6](https://github.com/StruisICT/InSearch/commit/3f4d6e6b5d3ae52aea79a5cfbde7d6acbf813291))
+
 ## [0.2.1](https://github.com/StruisICT/InSearch/compare/v0.2.0...v0.2.1) (2026-08-21)
 
 
