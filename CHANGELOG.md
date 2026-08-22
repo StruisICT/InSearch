@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/StruisICT/InSearch/compare/v0.2.2...v0.3.0) (2026-08-22)
+
+
+### Features
+
+* **gui:** detailed results view, clickable filenames, date filter, copy-all ([175c2d8](https://github.com/StruisICT/InSearch/commit/175c2d8bf55a838d2612efd7d3b53eb176d03a85))
+* **gui:** entry-time filter, sleek value-activated filters, calendar, filter-aware saved searches ([1369779](https://github.com/StruisICT/InSearch/commit/1369779cb06fa90c97cbfa74f14aa17a1ac591aa))
+
 ## [0.2.2](https://github.com/StruisICT/InSearch/compare/v0.2.1...v0.2.2) (2026-08-22)
 
 
