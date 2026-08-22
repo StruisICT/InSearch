@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::Sender;
 use grep_matcher::Matcher as _;
@@ -41,6 +41,9 @@ pub struct ScanOptions {
     pub follow_links: bool,
     /// Restrict which files are searched (name / extension / size / age).
     pub filter: FileFilter,
+    /// Keep only matches whose *in-content* timestamp falls in a range
+    /// (`None` = no entry-time filtering). See [`TimeFilter`].
+    pub time: Option<TimeFilter>,
 }
 
 impl Default for ScanOptions {
@@ -50,8 +53,22 @@ impl Default for ScanOptions {
             include_hidden: true,
             follow_links: false,
             filter: FileFilter::default(),
+            time: None,
         }
     }
+}
+
+/// Filters matches by the timestamp parsed from their *content* (the log
+/// line/block), not the file's modification time. Bounds are epoch **seconds**,
+/// inclusive. A match with no parseable leading timestamp is dropped while a
+/// filter is active. Set `mtime_prefilter` to also skip whole files whose
+/// last-modified time predates `after` (their newest entry can't be in range) —
+/// a cheap accelerator that assumes the file's mtime tracks its content.
+#[derive(Clone, Debug, Default)]
+pub struct TimeFilter {
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+    pub mtime_prefilter: bool,
 }
 
 /// Restricts which files a search visits. Empty fields impose no restriction, so
@@ -217,14 +234,43 @@ impl CompiledFilter {
     }
 }
 
+/// A compiled entry-time filter: parser + inclusive epoch-second bounds.
+struct CompiledTime {
+    parser: crate::timestamp::TimestampParser,
+    after: Option<i64>,
+    before: Option<i64>,
+    mtime_prefilter: bool,
+}
+
+impl CompiledTime {
+    /// `None` when the filter imposes no bound (so it stays inactive).
+    fn new(f: &TimeFilter) -> Option<Self> {
+        if f.after.is_none() && f.before.is_none() {
+            return None;
+        }
+        Some(CompiledTime {
+            parser: crate::timestamp::TimestampParser::default(),
+            after: f.after,
+            before: f.before,
+            mtime_prefilter: f.mtime_prefilter,
+        })
+    }
+
+    fn in_range(&self, ts: i64) -> bool {
+        self.after.is_none_or(|a| ts >= a) && self.before.is_none_or(|b| ts <= b)
+    }
+}
+
 /// A query compiled into concrete matchers: a unit matches when *every*
 /// `required` matcher matches and *no* `excluded` matcher does. `primary` (a
 /// superset — the first required matcher) is used to drive grep-searcher's line
-/// scan and to locate the matched line within a block.
+/// scan and to locate the matched line within a block. An optional `time` filter
+/// further restricts matches by their in-content timestamp.
 pub(crate) struct CompiledQuery {
     required: Vec<RegexMatcher>,
     excluded: Vec<RegexMatcher>,
     primary: RegexMatcher,
+    time: Option<CompiledTime>,
 }
 
 impl CompiledQuery {
@@ -237,6 +283,19 @@ impl CompiledQuery {
                 .excluded
                 .iter()
                 .any(|m| m.is_match(bytes).unwrap_or(false))
+    }
+
+    /// Whether `text`'s in-content timestamp passes the entry-time filter. Always
+    /// `true` when no filter is set; a unit with no parseable timestamp is
+    /// rejected while a filter is active.
+    pub(crate) fn time_ok(&self, text: &str) -> bool {
+        match &self.time {
+            None => true,
+            Some(t) => t
+                .parser
+                .parse_leading(text)
+                .is_some_and(|ts| t.in_range(ts)),
+        }
     }
 }
 
@@ -345,6 +404,7 @@ pub(crate) fn build_compiled(query: &Query) -> Result<CompiledQuery, String> {
         required,
         excluded,
         primary,
+        time: None,
     })
 }
 
@@ -363,7 +423,11 @@ pub fn search(
     scanned: Arc<AtomicUsize>,
 ) {
     let compiled = match build_compiled(query) {
-        Ok(c) => Arc::new(c),
+        Ok(mut c) => {
+            // Attach the entry-time filter (if any) from the scan options.
+            c.time = opts.time.as_ref().and_then(CompiledTime::new);
+            Arc::new(c)
+        }
         Err(e) => {
             let _ = tx.send(SearchEvent::Error(generation, e));
             return;
@@ -426,6 +490,24 @@ pub fn search(
             scanned.fetch_add(1, Ordering::Relaxed);
             if filter_active && !filter.accepts(&entry) {
                 return WalkState::Continue;
+            }
+            // Entry-time accelerator: if enabled, a file whose last-modified time
+            // predates the window's lower bound can't hold an in-range entry
+            // (its newest line ≈ its mtime), so skip it without reading.
+            if let Some(ct) = &compiled.time {
+                if ct.mtime_prefilter {
+                    if let Some(after) = ct.after {
+                        let too_old = entry
+                            .metadata()
+                            .ok()
+                            .and_then(|md| md.modified().ok())
+                            .and_then(|mt| mt.duration_since(UNIX_EPOCH).ok())
+                            .is_some_and(|d| (d.as_secs() as i64) < after);
+                        if too_old {
+                            return WalkState::Continue;
+                        }
+                    }
+                }
             }
             let path = entry.path().to_path_buf();
             match registry.resolve(&path).extract(&path) {
@@ -552,9 +634,10 @@ pub(crate) fn search_text_blocks(
             return false;
         }
         // A block matches when the whole block satisfies the query (all required
-        // terms present somewhere in it, no excluded term); the reported line is
-        // the first one containing the primary term.
-        if compiled.unit_matches(unit.text.as_bytes()) {
+        // terms present somewhere in it, no excluded term) and its leading
+        // timestamp passes the entry-time filter; the reported line is the first
+        // one containing the primary term.
+        if compiled.unit_matches(unit.text.as_bytes()) && compiled.time_ok(unit.text) {
             let matched_line =
                 first_matching_line(&compiled.primary, &unit).unwrap_or(unit.line_start);
             // Char-safe cap so we never split a multi-byte codepoint.
@@ -597,7 +680,7 @@ pub(crate) fn search_text_lines(
             return true;
         }
         let content = strip_eol(line);
-        if compiled.unit_matches(content.as_bytes()) {
+        if compiled.unit_matches(content.as_bytes()) && compiled.time_ok(content) {
             let ln = idx as u64 + 1;
             let m = Match {
                 path: path.to_path_buf(),
@@ -652,11 +735,16 @@ impl<'a> Sink for MatchSink<'a> {
         if !self.compiled.unit_matches(mat.bytes()) {
             return Ok(true);
         }
-        let line_start = mat.line_number().unwrap_or(0);
-        let byte_offset = mat.absolute_byte_offset();
         let text = String::from_utf8_lossy(mat.bytes())
             .trim_end_matches(['\r', '\n'])
             .to_string();
+        // Entry-time filter: drop lines whose in-content timestamp is out of
+        // range (or absent while the filter is active).
+        if !self.compiled.time_ok(&text) {
+            return Ok(true);
+        }
+        let line_start = mat.line_number().unwrap_or(0);
+        let byte_offset = mat.absolute_byte_offset();
         let m = Match {
             path: self.path.to_path_buf(),
             line_start,
@@ -803,6 +891,52 @@ mod tests {
         assert!(names.iter().any(|n| n == "a.log"));
         assert!(names.iter().any(|n| n == "b.txt"));
         assert!(!names.iter().any(|n| n == "notes.md"), "names: {names:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn entry_time_filter_slices_a_multi_day_log() {
+        let dir = tmpdir();
+        // One file spanning three days; mtime is "now" (recent) regardless.
+        write(
+            &dir,
+            "multi.log",
+            "2026-08-20 08:00:00 ERROR one\n\
+             2026-08-21 09:00:00 ERROR two\n\
+             2026-08-22 10:00:00 ERROR three\n",
+        );
+        let q = Query::literal("ERROR");
+        // Bounds via the same parser used by the filter → zone-consistent.
+        let p = crate::timestamp::TimestampParser::default();
+        let after = p.parse_leading("2026-08-21 00:00:00").unwrap();
+        let before = p.parse_leading("2026-08-21 23:59:59").unwrap();
+
+        // Keep only the 2026-08-21 entry.
+        let opts = ScanOptions {
+            time: Some(TimeFilter {
+                after: Some(after),
+                before: Some(before),
+                mtime_prefilter: false,
+            }),
+            ..ScanOptions::default()
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &q, opts);
+        assert_eq!(hits.len(), 1, "hits: {hits:?}");
+        assert!(hits[0].text.contains("two"), "text: {}", hits[0].text);
+
+        // The mtime accelerator must NOT drop this file: its mtime is recent, so
+        // it can't predate an old lower bound — all three still visible with a
+        // wide-open range.
+        let opts = ScanOptions {
+            time: Some(TimeFilter {
+                after: Some(after - 10 * 86_400),
+                before: None,
+                mtime_prefilter: true,
+            }),
+            ..ScanOptions::default()
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &q, opts);
+        assert_eq!(hits.len(), 3, "mtime accelerator wrongly dropped rows");
         std::fs::remove_dir_all(&dir).ok();
     }
 

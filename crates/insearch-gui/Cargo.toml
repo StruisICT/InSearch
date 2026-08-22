@@ -26,6 +26,9 @@ rfd = "0.17"
 regex = "1.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Local-time formatting for the Modified column + date-filter parsing (needs
+# OS timezone/DST data). `clock` pulls in the local-zone lookup only.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Windows-only: registry access for the Explorer context-menu integration.
 [target.'cfg(windows)'.dependencies]

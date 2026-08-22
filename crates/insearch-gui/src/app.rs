@@ -7,11 +7,12 @@
 //!   * `ui` drains the results channel each frame and repaints while a
 //!     search is live.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -19,7 +20,7 @@ use egui_extras::{Column, TableBuilder};
 
 use insearch_core::model::SearchEvent;
 use insearch_core::{
-    CaseMode, FileFilter, Granularity, Match, MatchMode, Mode, Query, ScanOptions,
+    CaseMode, FileFilter, Granularity, Match, MatchMode, Mode, Query, ScanOptions, TimeFilter,
 };
 
 /// Idle time after the last keystroke before a search fires.
@@ -50,51 +51,173 @@ fn parse_u64(s: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok().filter(|n| *n > 0)
 }
 
-/// Days since the Unix epoch for a civil (proleptic Gregorian) date, and its
-/// inverse — Howard Hinnant's `days_from_civil` / `civil_from_days`. Keeps date
-/// handling dependency-free (no chrono) for the filter + Modified column.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let m = m as i64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// Parse a `YYYY-MM-DD` date into a `SystemTime` at UTC midnight; blank/invalid
-/// → `None`.
-fn parse_date(s: &str) -> Option<SystemTime> {
+/// Parse `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` in the *local* zone. When only a
+/// date is given, `end_of_day` selects 23:59:59 (an upper bound) vs. 00:00:00
+/// (a lower bound). Blank/invalid → `None`. Local so the filters line up with
+/// the local Modified column and Explorer's timestamps.
+fn parse_local_dt(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono::Local>> {
+    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
-    let mut it = s.split('-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let mo: u32 = it.next()?.parse().ok()?;
-    let d: u32 = it.next()?.parse().ok()?;
-    if it.next().is_some() || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
-        return None;
+    // Full date+time first, then date-only.
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M") {
+        return Local.from_local_datetime(&ndt).single();
     }
-    let days = days_from_civil(y, mo, d);
-    if days < 0 {
-        return None;
+    let date = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    let naive = if end_of_day {
+        date.and_hms_opt(23, 59, 59)?
+    } else {
+        date.and_hms_opt(0, 0, 0)?
+    };
+    Local.from_local_datetime(&naive).single()
+}
+
+/// Epoch **seconds** for a local `YYYY-MM-DD [HH:MM]` (see [`parse_local_dt`]).
+fn parse_dt_epoch(s: &str, end_of_day: bool) -> Option<i64> {
+    parse_local_dt(s, end_of_day).map(|d| d.timestamp())
+}
+
+/// Days in a given month.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::NaiveDate;
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    let next = NaiveDate::from_ymd_opt(ny, nm, 1).unwrap();
+    next.signed_duration_since(first).num_days() as u32
+}
+
+/// Shift a date by whole months, clamping the day to the target month's length.
+fn add_months(d: chrono::NaiveDate, delta: i32) -> chrono::NaiveDate {
+    use chrono::{Datelike, NaiveDate};
+    let total = d.year() * 12 + (d.month() as i32 - 1) + delta;
+    let year = total.div_euclid(12);
+    let month = (total.rem_euclid(12) + 1) as u32;
+    let day = d.day().min(days_in_month(year, month));
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+/// A month-grid calendar. `view` is the shown month + highlighted day; month
+/// arrows mutate it. Returns `Some(date)` when the user clicks a day.
+fn calendar_grid(ui: &mut egui::Ui, view: &mut chrono::NaiveDate) -> Option<chrono::NaiveDate> {
+    use chrono::{Datelike, NaiveDate};
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        if ui.small_button("◀").clicked() {
+            *view = add_months(*view, -1);
+        }
+        ui.label(
+            egui::RichText::new(view.format("%B %Y").to_string())
+                .strong()
+                .size(13.0),
+        );
+        if ui.small_button("▶").clicked() {
+            *view = add_months(*view, 1);
+        }
+    });
+    egui::Grid::new("calendar_days")
+        .num_columns(7)
+        .spacing([2.0, 2.0])
+        .show(ui, |ui| {
+            for wd in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+                ui.weak(wd);
+            }
+            ui.end_row();
+            let first = NaiveDate::from_ymd_opt(view.year(), view.month(), 1).unwrap();
+            let lead = first.weekday().num_days_from_monday();
+            let mut col = 0;
+            for _ in 0..lead {
+                ui.label("");
+                col += 1;
+            }
+            for day in 1..=days_in_month(view.year(), view.month()) {
+                let d = NaiveDate::from_ymd_opt(view.year(), view.month(), day).unwrap();
+                if ui
+                    .selectable_label(d == *view, format!("{day:>2}"))
+                    .clicked()
+                {
+                    picked = Some(d);
+                }
+                col += 1;
+                if col % 7 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    picked
+}
+
+/// A text date field paired with a 📅 calendar-popup button. Typing and picking
+/// stay in sync: the calendar seeds from the field's current text, and choosing
+/// a date writes `YYYY-MM-DD` back (preserving a trailing `HH:MM` when
+/// `keep_time`). `open` holds the id of whichever field's calendar is showing.
+/// Returns whether the field changed.
+fn date_input(
+    ui: &mut egui::Ui,
+    field: &mut String,
+    view: &mut chrono::NaiveDate,
+    open: &mut Option<String>,
+    id: &str,
+    keep_time: bool,
+) -> bool {
+    use chrono::NaiveDate;
+    // Seed the calendar from a valid typed date so it opens on the right day.
+    if let Some(date_part) = field.split_whitespace().next() {
+        if let Ok(d) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+            *view = d;
+        }
     }
-    Some(UNIX_EPOCH + Duration::from_secs(days as u64 * 86_400))
+    let mut changed = ui
+        .add(
+            egui::TextEdit::singleline(field)
+                .hint_text(if keep_time {
+                    "YYYY-MM-DD [HH:MM]"
+                } else {
+                    "YYYY-MM-DD"
+                })
+                .desired_width(if keep_time { 140.0 } else { 100.0 }),
+        )
+        .changed();
+
+    let btn = ui.button("📅").on_hover_text("Pick from a calendar");
+    if btn.clicked() {
+        *open = if open.as_deref() == Some(id) {
+            None
+        } else {
+            Some(id.to_string())
+        };
+    }
+
+    if open.as_deref() == Some(id) {
+        let area = egui::Area::new(egui::Id::new(("calendar", id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(btn.rect.left_bottom())
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| calendar_grid(ui, view))
+                    .inner
+            });
+        if let Some(day) = area.inner {
+            let date = day.format("%Y-%m-%d").to_string();
+            // Keep any time-of-day the user already typed (entry-time fields).
+            *field = match (keep_time, field.split_once(' ')) {
+                (true, Some((_, time))) if !time.trim().is_empty() => {
+                    format!("{date} {}", time.trim())
+                }
+                _ => date,
+            };
+            changed = true;
+            *open = None;
+        } else if area.response.clicked_elsewhere() && !btn.clicked() {
+            *open = None; // dismiss on click outside
+        }
+    }
+    changed
 }
 
 /// Human-readable byte size (e.g. `4.2 KB`).
@@ -113,17 +236,12 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Format a modification time as `(date, date + time)`, both UTC.
+/// Format a modification time in *local* time as `(date, date + time + offset)`.
 fn format_mtime(t: SystemTime) -> (String, String) {
-    let secs = t
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
-    let rem = secs.rem_euclid(86_400);
-    let (hh, mi) = (rem / 3600, (rem % 3600) / 60);
-    let date = format!("{y:04}-{mo:02}-{d:02}");
-    let full = format!("{date} {hh:02}:{mi:02} UTC");
+    use chrono::{DateTime, Local};
+    let dt: DateTime<Local> = t.into();
+    let date = dt.format("%Y-%m-%d").to_string();
+    let full = dt.format("%Y-%m-%d %H:%M %:z").to_string();
     (date, full)
 }
 
@@ -222,8 +340,21 @@ pub struct App {
     filter_min_kb: String,
     filter_max_kb: String,
     filter_days: String,
+    // File-date filter (on the file's modified time). Active when a bound is set.
     filter_after: String,
     filter_before: String,
+    // Entry-time filter: match a timestamp *inside* the file content. Active when
+    // a bound is set; zero-cost (skipped) when both fields are blank.
+    filter_ts_after: String,
+    filter_ts_before: String,
+    ts_mtime_prefilter: bool,
+    // Calendar-picker state backing each date field (seeded from the text).
+    pick_after: chrono::NaiveDate,
+    pick_before: chrono::NaiveDate,
+    pick_ts_after: chrono::NaiveDate,
+    pick_ts_before: chrono::NaiveDate,
+    /// Id of the date field whose calendar popup is currently open (if any).
+    cal_open: Option<String>,
 
     // Roots to search
     roots: Vec<PathBuf>,
@@ -239,7 +370,7 @@ pub struct App {
     /// How the results table is rendered (compact vs. detailed).
     view: ResultView,
     /// Per-path filesystem metadata (size/modified), computed once per search.
-    meta_cache: HashMap<PathBuf, FileMeta>,
+    meta_cache: RefCell<HashMap<PathBuf, FileMeta>>,
     truncated: bool,
     error: Option<String>,
     /// Compiled from the active query to highlight matches in result previews.
@@ -284,15 +415,13 @@ struct PendingWatch {
 }
 
 /// A search hit with its display strings computed once on ingest, so the
-/// virtualized results table doesn't reallocate them every frame.
+/// virtualized results table doesn't reallocate them every frame. File metadata
+/// (size/modified) is *not* here — it's statted lazily, only for the visible
+/// rows of the Detailed view, so plain searches never touch the filesystem.
 struct ResultRow {
     path: PathBuf,
     file_name: String,
     path_display: String,
-    dir_display: String,
-    size_label: String,
-    modified_label: String,
-    modified_hover: String,
     line_label: String,
     line_hover: Option<String>,
     preview: String,
@@ -302,6 +431,7 @@ struct ResultRow {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_root: Option<PathBuf>) -> Self {
         let dark = true;
+        let today = chrono::Local::now().date_naive();
         super::palette::apply(&cc.egui_ctx, dark);
         // Launched with a folder (e.g. Explorer "Search with InSearch")? Put the
         // cursor straight in the search box so the user can just type.
@@ -327,6 +457,14 @@ impl App {
             filter_days: String::new(),
             filter_after: String::new(),
             filter_before: String::new(),
+            filter_ts_after: String::new(),
+            filter_ts_before: String::new(),
+            ts_mtime_prefilter: false,
+            pick_after: today,
+            pick_before: today,
+            pick_ts_after: today,
+            pick_ts_before: today,
+            cal_open: None,
             roots: initial_root.into_iter().collect(),
             generation_counter: Arc::new(AtomicU64::new(0)),
             active_generation: 0,
@@ -336,7 +474,7 @@ impl App {
             watch_handle: None,
             results: Vec::new(),
             view: ResultView::Compact,
-            meta_cache: HashMap::new(),
+            meta_cache: RefCell::new(HashMap::new()),
             truncated: false,
             error: None,
             highlight: None,
@@ -369,11 +507,28 @@ impl App {
         ScanOptions {
             respect_gitignore: self.respect_gitignore,
             filter: self.build_filter(),
+            time: self.build_time_filter(),
             ..ScanOptions::default()
         }
     }
 
+    /// The in-content entry-time filter, or `None` when no bound is set (blank
+    /// fields → no filtering and no per-match timestamp parsing).
+    fn build_time_filter(&self) -> Option<TimeFilter> {
+        let after = parse_dt_epoch(&self.filter_ts_after, false);
+        let before = parse_dt_epoch(&self.filter_ts_before, true);
+        if after.is_none() && before.is_none() {
+            return None;
+        }
+        Some(TimeFilter {
+            after,
+            before,
+            mtime_prefilter: self.ts_mtime_prefilter,
+        })
+    }
+
     fn build_filter(&self) -> FileFilter {
+        // Every field is self-activating: a blank field imposes no restriction.
         FileFilter {
             name_pattern: self.filter_name.trim().to_string(),
             name_is_regex: self.filter_name_regex,
@@ -382,16 +537,16 @@ impl App {
             min_size: parse_kb(&self.filter_min_kb),
             max_size: parse_kb(&self.filter_max_kb),
             modified_within_days: parse_u64(&self.filter_days),
-            modified_after: parse_date(&self.filter_after),
-            // Make "before" inclusive of the whole named day.
-            modified_before: parse_date(&self.filter_before)
-                .map(|t| t + Duration::from_secs(86_400)),
+            modified_after: parse_local_dt(&self.filter_after, false).map(SystemTime::from),
+            modified_before: parse_local_dt(&self.filter_before, true).map(SystemTime::from),
         }
     }
 
-    /// Build (once, cached) the display metadata for a result's file.
-    fn file_meta(&mut self, path: &Path) -> FileMeta {
-        if let Some(m) = self.meta_cache.get(path) {
+    /// Display metadata for a result's file, statted once and cached. Called
+    /// only while rendering *visible* Detailed-view rows (a few dozen), never on
+    /// the search/ingest path — so Compact searches never hit the filesystem.
+    fn file_meta(&self, path: &Path) -> FileMeta {
+        if let Some(m) = self.meta_cache.borrow().get(path) {
             return m.clone();
         }
         let dir_display = path
@@ -411,12 +566,14 @@ impl App {
             modified_label,
             modified_hover,
         };
-        self.meta_cache.insert(path.to_path_buf(), meta.clone());
+        self.meta_cache
+            .borrow_mut()
+            .insert(path.to_path_buf(), meta.clone());
         meta
     }
 
-    /// Build a display row from a raw match, filling in cached file metadata.
-    fn make_row(&mut self, m: Match) -> ResultRow {
+    /// Build a display row from a raw match. Cheap: no filesystem access.
+    fn make_row(m: Match) -> ResultRow {
         let file_name = m
             .path
             .file_name()
@@ -435,15 +592,10 @@ impl App {
         };
         // Collapse newlines so a block occupies one virtualized row.
         let preview = m.text.replace(['\r', '\n'], " ⏎ ");
-        let meta = self.file_meta(&m.path);
         ResultRow {
             path: m.path,
             file_name,
             path_display,
-            dir_display: meta.dir_display,
-            size_label: meta.size_label,
-            modified_label: meta.modified_label,
-            modified_hover: meta.modified_hover,
             line_label,
             line_hover,
             preview,
@@ -474,6 +626,18 @@ impl App {
                 Granularity::Block => 1,
             },
             roots: self.roots.clone(),
+            filter_name: self.filter_name.clone(),
+            filter_name_regex: self.filter_name_regex,
+            filter_include_exts: self.filter_include_exts.clone(),
+            filter_exclude_exts: self.filter_exclude_exts.clone(),
+            filter_min_kb: self.filter_min_kb.clone(),
+            filter_max_kb: self.filter_max_kb.clone(),
+            filter_days: self.filter_days.clone(),
+            filter_after: self.filter_after.clone(),
+            filter_before: self.filter_before.clone(),
+            filter_ts_after: self.filter_ts_after.clone(),
+            filter_ts_before: self.filter_ts_before.clone(),
+            ts_mtime_prefilter: self.ts_mtime_prefilter,
         }
     }
 
@@ -499,6 +663,38 @@ impl App {
             Granularity::Line
         };
         self.roots = s.roots.clone();
+        // Restore filters, fully replacing the current set (an empty snapshot
+        // clears them). Raw strings/flags, so this is a plain assignment.
+        self.filter_name = s.filter_name.clone();
+        self.filter_name_regex = s.filter_name_regex;
+        self.filter_include_exts = s.filter_include_exts.clone();
+        self.filter_exclude_exts = s.filter_exclude_exts.clone();
+        self.filter_min_kb = s.filter_min_kb.clone();
+        self.filter_max_kb = s.filter_max_kb.clone();
+        self.filter_days = s.filter_days.clone();
+        self.filter_after = s.filter_after.clone();
+        self.filter_before = s.filter_before.clone();
+        self.filter_ts_after = s.filter_ts_after.clone();
+        self.filter_ts_before = s.filter_ts_before.clone();
+        self.ts_mtime_prefilter = s.ts_mtime_prefilter;
+        // Reveal the filter panel when the loaded search carries any filter.
+        if [
+            &s.filter_name,
+            &s.filter_include_exts,
+            &s.filter_exclude_exts,
+            &s.filter_min_kb,
+            &s.filter_max_kb,
+            &s.filter_days,
+            &s.filter_after,
+            &s.filter_before,
+            &s.filter_ts_after,
+            &s.filter_ts_before,
+        ]
+        .iter()
+        .any(|f| !f.trim().is_empty())
+        {
+            self.show_filters = true;
+        }
         self.launch_search();
     }
 
@@ -533,7 +729,7 @@ impl App {
         let g = self.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
         self.active_generation = g;
         self.results.clear();
-        self.meta_cache.clear();
+        self.meta_cache.borrow_mut().clear();
         self.truncated = false;
         self.error = None;
         self.status_notice = None;
@@ -614,7 +810,7 @@ impl App {
                 SearchEvent::Match(g, m) => {
                     if g == self.active_generation {
                         if self.results.len() < MAX_RESULTS {
-                            let row = self.make_row(m);
+                            let row = Self::make_row(m);
                             self.results.push(row);
                         } else {
                             self.truncated = true;
@@ -663,92 +859,147 @@ impl App {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             egui::Grid::new("filters_grid")
                 .num_columns(2)
-                .spacing([8.0, 4.0])
+                .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Name:");
+                    // Each row is self-activating: leave it blank to ignore it.
+                    ui.weak("Name");
                     ui.horizontal(|ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.filter_name)
                                     .hint_text("glob e.g. *.log")
-                                    .desired_width(180.0),
+                                    .desired_width(200.0),
                             )
                             .changed();
-                        changed |= ui.checkbox(&mut self.filter_name_regex, "regex").changed();
+                        if ui
+                            .selectable_label(self.filter_name_regex, ".*")
+                            .on_hover_text("Treat the name pattern as a regular expression")
+                            .clicked()
+                        {
+                            self.filter_name_regex = !self.filter_name_regex;
+                            changed = true;
+                        }
                     });
                     ui.end_row();
 
-                    ui.label("Extensions:");
+                    ui.weak("Type");
                     ui.horizontal(|ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.filter_include_exts)
-                                    .hint_text("include e.g. log,txt")
-                                    .desired_width(120.0),
+                                    .hint_text("only these ext: log, txt")
+                                    .desired_width(150.0),
                             )
                             .changed();
-                        ui.label("exclude:");
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.filter_exclude_exts)
-                                    .hint_text("e.g. min.js")
-                                    .desired_width(120.0),
+                                    .hint_text("not these: min.js, map")
+                                    .desired_width(150.0),
                             )
                             .changed();
                     });
                     ui.end_row();
 
-                    ui.label("Size (KB):");
+                    ui.weak("Size KB");
                     ui.horizontal(|ui| {
-                        ui.label("min");
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.filter_min_kb)
-                                    .desired_width(70.0),
+                                    .hint_text("min")
+                                    .desired_width(80.0),
                             )
                             .changed();
-                        ui.label("max");
+                        ui.weak("–");
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.filter_max_kb)
-                                    .desired_width(70.0),
+                                    .hint_text("max")
+                                    .desired_width(80.0),
                             )
                             .changed();
                     });
                     ui.end_row();
 
-                    ui.label("Modified:");
+                    ui.weak("Recent");
                     ui.horizontal(|ui| {
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.filter_days)
-                                    .desired_width(70.0),
+                                    .hint_text("N")
+                                    .desired_width(60.0),
                             )
                             .changed();
-                        ui.label("within N days (blank = any)");
+                        ui.weak("days since modified");
                     });
                     ui.end_row();
 
-                    ui.label("Date range:");
+                    ui.weak("File date")
+                        .on_hover_text("File last-modified between (date, optional HH:MM)");
                     ui.horizontal(|ui| {
-                        ui.label("after");
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.filter_after)
-                                    .hint_text("YYYY-MM-DD")
-                                    .desired_width(100.0),
-                            )
-                            .on_hover_text("Only files modified on/after this date")
-                            .changed();
-                        ui.label("before");
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.filter_before)
-                                    .hint_text("YYYY-MM-DD")
-                                    .desired_width(100.0),
-                            )
-                            .on_hover_text("Only files modified on/before this date")
-                            .changed();
+                        changed |= date_input(
+                            ui,
+                            &mut self.filter_after,
+                            &mut self.pick_after,
+                            &mut self.cal_open,
+                            "pick_after",
+                            true,
+                        );
+                        ui.weak("→");
+                        changed |= date_input(
+                            ui,
+                            &mut self.filter_before,
+                            &mut self.pick_before,
+                            &mut self.cal_open,
+                            "pick_before",
+                            true,
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.weak("Entry time").on_hover_text(
+                        "Timestamp inside each matching log line/block — slices a \
+                         multi-day log to just the entries in this window",
+                    );
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            changed |= date_input(
+                                ui,
+                                &mut self.filter_ts_after,
+                                &mut self.pick_ts_after,
+                                &mut self.cal_open,
+                                "pick_ts_after",
+                                true,
+                            );
+                            ui.weak("→");
+                            changed |= date_input(
+                                ui,
+                                &mut self.filter_ts_before,
+                                &mut self.pick_ts_before,
+                                &mut self.cal_open,
+                                "pick_ts_before",
+                                true,
+                            );
+                        });
+                        // The mtime accelerator only matters once a bound is set.
+                        let ts_active = !self.filter_ts_after.trim().is_empty()
+                            || !self.filter_ts_before.trim().is_empty();
+                        if ts_active
+                            && ui
+                                .selectable_label(
+                                    self.ts_mtime_prefilter,
+                                    "⚡ skip files older than “from”",
+                                )
+                                .on_hover_text(
+                                    "Accelerator: a file whose last-modified time is before \
+                                     the lower bound can't hold a newer entry, so it's skipped \
+                                     unread. Turn off if file times aren't reliable.",
+                                )
+                                .clicked()
+                        {
+                            self.ts_mtime_prefilter = !self.ts_mtime_prefilter;
+                            changed = true;
+                        }
                     });
                     ui.end_row();
                 });
@@ -1324,16 +1575,18 @@ impl App {
                         }
                     });
                     if detailed {
+                        // Stat lazily — only for this visible row, cached.
+                        let meta = self.file_meta(&r.path);
                         row.col(|ui| {
-                            ui.label(&r.dir_display).on_hover_text(&r.path_display);
+                            ui.label(&meta.dir_display).on_hover_text(&r.path_display);
                         });
                         row.col(|ui| {
-                            ui.label(&r.size_label);
+                            ui.label(&meta.size_label);
                         });
                         row.col(|ui| {
-                            let resp = ui.label(&r.modified_label);
-                            if !r.modified_hover.is_empty() {
-                                resp.on_hover_text(&r.modified_hover);
+                            let resp = ui.label(&meta.modified_label);
+                            if !meta.modified_hover.is_empty() {
+                                resp.on_hover_text(&meta.modified_hover);
                             }
                         });
                     }
@@ -1478,29 +1731,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn civil_days_round_trip() {
-        // Epoch anchor and a few known dates.
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // Round-trip across a leap day and a century boundary.
-        for (y, m, d) in [(2000, 2, 29), (2020, 12, 31), (1999, 7, 4), (2026, 8, 22)] {
-            let days = days_from_civil(y, m, d);
-            assert_eq!(civil_from_days(days), (y, m, d), "for {y}-{m}-{d}");
-        }
+    fn parse_local_dt_accepts_date_and_time_rejects_junk() {
+        assert!(parse_local_dt("", false).is_none());
+        assert!(parse_local_dt("not-a-date", false).is_none());
+        assert!(parse_local_dt("2026-13-01", false).is_none()); // bad month
+        assert!(parse_local_dt("2026-08", false).is_none()); // too few parts
+        assert!(parse_local_dt("2026-08-01-1", false).is_none()); // trailing junk
+        assert!(parse_local_dt("2026-08-22", false).is_some()); // date only
+        assert!(parse_local_dt("2026-08-22 09:15", false).is_some()); // date + time
     }
 
     #[test]
-    fn parse_date_accepts_iso_and_rejects_junk() {
-        assert_eq!(parse_date(""), None);
-        assert_eq!(parse_date("not-a-date"), None);
-        assert_eq!(parse_date("2026-13-01"), None); // bad month
-        assert_eq!(parse_date("2026-08"), None); // too few parts
-        assert_eq!(parse_date("2026-08-01-1"), None); // too many parts
-        let t = parse_date("1970-01-02").expect("valid date");
-        assert_eq!(
-            t.duration_since(UNIX_EPOCH).unwrap(),
-            Duration::from_secs(86_400)
-        );
+    fn parse_then_format_round_trips_the_date() {
+        // parse_local_dt builds a *local* instant and format_mtime renders in
+        // *local* time, so the date component round-trips on any machine zone.
+        let t = SystemTime::from(parse_local_dt("2026-08-22", false).expect("valid date"));
+        assert_eq!(format_mtime(t).0, "2026-08-22");
+    }
+
+    #[test]
+    fn end_of_day_upper_bound_is_after_start_of_day() {
+        // A bare date as an upper bound resolves later than as a lower bound.
+        let lo = parse_local_dt("2026-08-22", false).unwrap();
+        let hi = parse_local_dt("2026-08-22", true).unwrap();
+        assert!(hi > lo);
     }
 
     #[test]
@@ -1509,12 +1763,5 @@ mod tests {
         assert_eq!(human_size(1024), "1.0 KB");
         assert_eq!(human_size(1536), "1.5 KB");
         assert_eq!(human_size(1_048_576), "1.0 MB");
-    }
-
-    #[test]
-    fn format_mtime_is_utc_epoch() {
-        let (date, full) = format_mtime(UNIX_EPOCH);
-        assert_eq!(date, "1970-01-01");
-        assert_eq!(full, "1970-01-01 00:00 UTC");
     }
 }

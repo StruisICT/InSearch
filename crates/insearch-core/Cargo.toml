@@ -23,6 +23,9 @@ ignore.workspace = true
 regex.workspace = true
 crossbeam-channel.workspace = true
 notify-debouncer-full = "0.7"
+# Parse in-content log timestamps into epoch seconds for the entry-time filter
+# (naive timestamps interpreted in the local zone). `clock` = local-zone lookup.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Optional binary-format extractors (pure-Rust; pdf-extract is lopdf-based).
 calamine = { version = "0.36", optional = true }
