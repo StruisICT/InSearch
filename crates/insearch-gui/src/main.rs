@@ -16,10 +16,11 @@ mod session;
 const ICON_PNG: &[u8] = include_bytes!("../icon-256.png");
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use eframe::egui;
 
-fn main() -> eframe::Result<()> {
+fn main() -> ExitCode {
     // First non-flag argument is an initial search root, if any.
     let initial_root: Option<PathBuf> = std::env::args()
         .skip(1)
@@ -39,9 +40,26 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    match eframe::run_native(
         "InSearch",
         native_options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, initial_root.clone())))),
-    )
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            // Reaching here almost always means the windowing / OpenGL (glow) context
+            // failed to initialise — a headless VM, an RDP session without hardware
+            // acceleration, or a stale graphics driver. That's an environment
+            // limitation, not a fault in InSearch, so report it and exit cleanly
+            // rather than propagating a non-zero code. (Propagating would also trip
+            // winget's install-time executable validation, which launches the exe on
+            // a GPU-less runner.)
+            eprintln!(
+                "InSearch could not open a window: {err}\n\
+                 This usually means no GPU/display is available (headless server, RDP \
+                 without hardware acceleration, or an outdated graphics driver)."
+            );
+            ExitCode::SUCCESS
+        }
+    }
 }
