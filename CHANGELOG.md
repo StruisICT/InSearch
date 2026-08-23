@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/StruisICT/InSearch/compare/v0.3.1...v0.4.0) (2026-08-23)
+
+
+### Features
+
+* watch-mode filters, persisted preferences, keyboard shortcuts, faster scans ([df6524c](https://github.com/StruisICT/InSearch/commit/df6524c9367c00b6ba8a68edb2e902ad6277844b))
+
 ## [0.3.1](https://github.com/StruisICT/InSearch/compare/v0.3.0...v0.3.1) (2026-08-23)
 
 
