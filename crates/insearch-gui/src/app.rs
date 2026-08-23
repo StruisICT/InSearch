@@ -31,6 +31,8 @@ const MIN_QUERY_LEN: usize = 2;
 const MAX_RESULTS: usize = 10_000;
 /// Bounded channel depth — backpressure against a firehose of matches.
 const CHANNEL_CAP: usize = 4096;
+/// Release version (set by build.rs from the release-please manifest).
+const VERSION: &str = env!("INSEARCH_VERSION");
 
 /// Parse a comma/space/semicolon-separated extension list, dropping any leading
 /// dots and lowercasing.
@@ -397,6 +399,8 @@ pub struct App {
     // Settings window (Explorer context-menu integration)
     show_settings: bool,
     settings_msg: Option<String>,
+    // About window
+    show_about: bool,
 
     // Watch mode: the watcher is started only after the initial full scan
     // finishes (on `Done`), so its first-seen `Clear` can't race the scan's
@@ -488,6 +492,7 @@ impl App {
             pending_since: None,
             show_settings: false,
             settings_msg: None,
+            show_about: false,
             pending_watch: None,
         }
     }
@@ -1124,6 +1129,9 @@ impl App {
                     self.dark = !self.dark;
                     super::palette::apply(ui.ctx(), self.dark);
                 }
+                if ui.button("ℹ About").clicked() {
+                    self.show_about = !self.show_about;
+                }
                 if ui.button("⚙ Settings").clicked() {
                     self.show_settings = !self.show_settings;
                     self.settings_msg = None;
@@ -1305,6 +1313,62 @@ impl App {
     }
 
     /// Settings window: the Windows Explorer right-click integration toggle.
+    /// About window: app identity, Struis ICT, source, license, and a coffee link.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let pal = super::palette::palette(self.dark);
+        let mut open = self.show_about;
+        egui::Window::new("About InSearch")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("InSearch")
+                            .color(pal.blue)
+                            .strong()
+                            .size(18.0),
+                    );
+                    ui.label(egui::RichText::new(format!("v{VERSION}")).color(pal.subtext));
+                });
+                ui.label("Real-time, content-aware file search.");
+                ui.add_space(8.0);
+
+                egui::Grid::new("about_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Made by");
+                        ui.hyperlink_to("Struis ICT", "https://struisict.com");
+                        ui.end_row();
+                        ui.label("Source");
+                        ui.hyperlink_to("GitHub", "https://github.com/StruisICT/InSearch");
+                        ui.end_row();
+                        ui.label("License");
+                        ui.label("MIT");
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Enjoying InSearch?");
+                    ui.hyperlink_to("☕ Buy me a coffee", "https://buymeacoffee.com/struis112");
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("© Struis ICT")
+                        .color(pal.subtext)
+                        .size(11.0),
+                );
+            });
+        self.show_about = open;
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
@@ -1693,6 +1757,7 @@ impl eframe::App for App {
             });
 
         self.settings_window(&ctx);
+        self.about_window(&ctx);
 
         egui::CentralPanel::default()
             .frame(
