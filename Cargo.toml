@@ -22,6 +22,8 @@ regex = "1.13"
 crossbeam-channel = "0.5"
 
 # Aggressive size/perf-oriented release profile (mirrors ClutterCutter).
+# (`opt-level = "z"` was benchmarked equal to `3` for search speed here — LTO
+# already optimizes the hot regex path — so we keep the smaller binary.)
 [profile.release]
 opt-level = "z"
 lto = "fat"

@@ -33,6 +33,27 @@ const MAX_RESULTS: usize = 10_000;
 const CHANNEL_CAP: usize = 4096;
 /// Release version (set by build.rs from the release-please manifest).
 const VERSION: &str = env!("INSEARCH_VERSION");
+/// Storage key for persisted preferences.
+const PREFS_KEY: &str = "insearch_prefs";
+
+/// Preferences persisted across sessions via eframe storage (window geometry is
+/// handled separately by eframe itself).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Prefs {
+    dark: bool,
+    detailed: bool,
+    roots: Vec<PathBuf>,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            dark: true,
+            detailed: false,
+            roots: Vec::new(),
+        }
+    }
+}
 
 /// Parse a comma/space/semicolon-separated extension list, dropping any leading
 /// dots and lowercasing.
@@ -414,6 +435,7 @@ struct PendingWatch {
     generation: u64,
     roots: Vec<PathBuf>,
     query: Query,
+    opts: ScanOptions,
     generation_counter: Arc<AtomicU64>,
     tx: Sender<SearchEvent>,
 }
@@ -434,12 +456,28 @@ struct ResultRow {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_root: Option<PathBuf>) -> Self {
-        let dark = true;
+        // Restore persisted preferences (theme, view, last folders). Window size
+        // and position are restored automatically by eframe.
+        let prefs: Prefs = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, PREFS_KEY))
+            .unwrap_or_default();
+        let dark = prefs.dark;
+        let view = if prefs.detailed {
+            ResultView::Detailed
+        } else {
+            ResultView::Compact
+        };
         let today = chrono::Local::now().date_naive();
         super::palette::apply(&cc.egui_ctx, dark);
         // Launched with a folder (e.g. Explorer "Search with InSearch")? Put the
-        // cursor straight in the search box so the user can just type.
+        // cursor straight in the search box so the user can just type — and use
+        // that folder. Otherwise restore the folders from the last session.
         let focus_search = initial_root.is_some();
+        let roots = match initial_root {
+            Some(r) => vec![r],
+            None => prefs.roots,
+        };
         App {
             focus_search,
             query_text: String::new(),
@@ -469,7 +507,7 @@ impl App {
             pick_ts_after: today,
             pick_ts_before: today,
             cal_open: None,
-            roots: initial_root.into_iter().collect(),
+            roots,
             generation_counter: Arc::new(AtomicU64::new(0)),
             active_generation: 0,
             rx: None,
@@ -477,7 +515,7 @@ impl App {
             watching: false,
             watch_handle: None,
             results: Vec::new(),
-            view: ResultView::Compact,
+            view,
             meta_cache: RefCell::new(HashMap::new()),
             truncated: false,
             error: None,
@@ -752,6 +790,7 @@ impl App {
 
         let roots = self.roots.clone();
         let opts = self.scan_options();
+        let watch_opts = opts.clone(); // for the deferred watcher (opts is moved below)
         let generation_counter = self.generation_counter.clone();
 
         // Initial full scan (both modes) on its own thread.
@@ -775,6 +814,7 @@ impl App {
                 generation: g,
                 roots,
                 query,
+                opts: watch_opts,
                 generation_counter,
                 tx,
             });
@@ -792,6 +832,7 @@ impl App {
         match insearch_core::start_watch(
             &pw.roots,
             &pw.query,
+            &pw.opts,
             pw.generation,
             pw.generation_counter,
             pw.tx,
@@ -1313,6 +1354,40 @@ impl App {
     }
 
     /// Settings window: the Windows Explorer right-click integration toggle.
+    /// Global keyboard shortcuts: Ctrl+F focus search, Ctrl+L toggle Live/Watch,
+    /// Esc closes a popup or clears the query.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let (ctrl_f, ctrl_l, esc) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::F) && i.modifiers.command,
+                i.key_pressed(egui::Key::L) && i.modifiers.command,
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if ctrl_f {
+            self.focus_search = true;
+        }
+        if ctrl_l {
+            self.mode = if self.mode == Mode::Live {
+                Mode::Watch
+            } else {
+                Mode::Live
+            };
+            self.launch_search();
+        }
+        if esc {
+            if self.cal_open.is_some() {
+                self.cal_open = None;
+            } else if self.show_about || self.show_settings {
+                self.show_about = false;
+                self.show_settings = false;
+            } else if !self.query_text.is_empty() {
+                self.query_text.clear();
+                self.pending_since = Some(Instant::now());
+            }
+        }
+    }
+
     /// About window: app identity, Struis ICT, source, license, and a coffee link.
     fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
@@ -1719,10 +1794,24 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Persist preferences (theme, view, folders). Window geometry is saved by
+    /// eframe itself. Called periodically and on exit.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let prefs = Prefs {
+            dark: self.dark,
+            detailed: self.view == ResultView::Detailed,
+            roots: self.roots.clone(),
+        };
+        eframe::set_value(storage, PREFS_KEY, &prefs);
+    }
+
     // egui 0.36: the App entry point is `ui` (a root `Ui`), and panels are shown
     // *into* a `Ui` rather than onto the `Context`.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Global keyboard shortcuts.
+        self.handle_shortcuts(&ctx);
 
         // Fire a debounced search once typing settles.
         if let Some(since) = self.pending_since {

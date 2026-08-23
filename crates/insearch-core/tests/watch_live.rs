@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use insearch_core::model::SearchEvent;
-use insearch_core::{start_watch, Granularity, Query};
+use insearch_core::{start_watch, Granularity, Query, ScanOptions};
 
 #[test]
 #[ignore = "timing-dependent; run with --ignored"]
@@ -25,7 +25,16 @@ fn watcher_reports_appended_matches() {
         ..Query::literal("ERROR")
     };
 
-    let _handle = start_watch(std::slice::from_ref(&dir), &query, 1, current_gen, tx).unwrap();
+    let opts = ScanOptions::default();
+    let _handle = start_watch(
+        std::slice::from_ref(&dir),
+        &query,
+        &opts,
+        1,
+        current_gen,
+        tx,
+    )
+    .unwrap();
 
     // Give the watcher a moment to register, then append a matching line.
     std::thread::sleep(Duration::from_millis(300));

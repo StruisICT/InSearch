@@ -21,7 +21,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::Sender;
 use notify_debouncer_full::notify::event::ModifyKind;
@@ -31,7 +31,7 @@ use notify_debouncer_full::{
 };
 
 use crate::model::{Granularity, Match, Query, SearchEvent};
-use crate::scan::{build_compiled, search_file_blocks, CompiledQuery};
+use crate::scan::{build_compiled, search_file_blocks, CompiledFilter, CompiledQuery, ScanOptions};
 use crate::split::{strip_eol, BlockSplitter};
 
 /// Debounce window for coalescing bursts of filesystem events.
@@ -52,6 +52,7 @@ pub struct WatchHandle {
 pub fn start(
     roots: &[PathBuf],
     query: &Query,
+    opts: &ScanOptions,
     generation: u64,
     current_gen: Arc<AtomicU64>,
     tx: Sender<SearchEvent>,
@@ -73,8 +74,9 @@ pub fn start(
     }
 
     let query = query.clone();
+    let opts = opts.clone();
     std::thread::spawn(move || {
-        let mut tailer = match Tailer::new(query, generation, current_gen, tx) {
+        let mut tailer = match Tailer::new(query, &opts, generation, current_gen, tx) {
             Some(t) => t,
             None => return, // invalid regex — the initial scan already reported it
         };
@@ -108,6 +110,10 @@ struct FileState {
 struct Tailer {
     compiled: CompiledQuery,
     block: Option<BlockSplitter>,
+    /// File filter (name / ext / size / date) — applied to each changed file so
+    /// watch mode honours the same filters as the live scan.
+    filter: CompiledFilter,
+    filter_active: bool,
     generation: u64,
     current_gen: Arc<AtomicU64>,
     tx: Sender<SearchEvent>,
@@ -117,19 +123,25 @@ struct Tailer {
 impl Tailer {
     fn new(
         query: Query,
+        opts: &ScanOptions,
         generation: u64,
         current_gen: Arc<AtomicU64>,
         tx: Sender<SearchEvent>,
     ) -> Option<Self> {
-        let compiled = build_compiled(&query).ok()?;
+        let mut compiled = build_compiled(&query).ok()?;
+        compiled.attach_time(&opts.time); // entry-time filter, as in the live scan
         let block = if query.granularity == Granularity::Block {
             Some(BlockSplitter::default())
         } else {
             None
         };
+        let filter = CompiledFilter::new(&opts.filter, SystemTime::now());
+        let filter_active = filter.is_active();
         Some(Tailer {
             compiled,
             block,
+            filter,
+            filter_active,
             generation,
             current_gen,
             tx,
@@ -183,6 +195,10 @@ impl Tailer {
 
     fn rescan(&mut self, path: &Path) {
         if !path.is_file() {
+            return;
+        }
+        // Honour the file filter (name / ext / size / date) just like the scan.
+        if self.filter_active && !self.filter.accepts_path(path) {
             return;
         }
         match self.block {
@@ -277,7 +293,7 @@ impl Tailer {
         for line in text.split_inclusive('\n') {
             local_line += 1;
             let content = strip_eol(line);
-            if self.compiled.unit_matches(content.as_bytes()) {
+            if self.compiled.unit_matches(content.as_bytes()) && self.compiled.time_ok(content) {
                 let m = Match {
                     path: path.to_path_buf(),
                     line_start: base_line + local_line,
@@ -340,7 +356,8 @@ mod tests {
 
         let (tx, rx) = crossbeam_channel::unbounded();
         let current_gen = Arc::new(AtomicU64::new(7));
-        let mut tailer = Tailer::new(line_query(), 7, current_gen, tx).unwrap();
+        let opts = ScanOptions::default();
+        let mut tailer = Tailer::new(line_query(), &opts, 7, current_gen, tx).unwrap();
 
         // First pass: clears prior (initial-scan) matches, then reports line 2.
         tailer.tail_lines(&path);
@@ -374,6 +391,44 @@ mod tests {
     }
 
     #[test]
+    fn tailing_honours_entry_time_filter() {
+        use crate::scan::TimeFilter;
+        let path = tmp_file("tf.log");
+        let _ = std::fs::remove_file(&path);
+        append(
+            &path,
+            "2026-08-20 08:00:00 ERROR old\n2026-08-22 09:00:00 ERROR new\n",
+        );
+
+        let p = crate::timestamp::TimestampParser::default();
+        let after = p.parse_leading("2026-08-22 00:00:00").unwrap();
+        let opts = ScanOptions {
+            time: Some(TimeFilter {
+                after: Some(after),
+                before: None,
+                mtime_prefilter: false,
+            }),
+            ..ScanOptions::default()
+        };
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let current_gen = Arc::new(AtomicU64::new(1));
+        let mut tailer = Tailer::new(line_query(), &opts, 1, current_gen, tx).unwrap();
+        tailer.tail_lines(&path);
+
+        // Only the 2026-08-22 entry (line 2) is in range; the old one is dropped.
+        let matches: Vec<_> = drain(&rx)
+            .iter()
+            .filter_map(|e| match e {
+                SearchEvent::Match(_, m) => Some(m.line_start),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(matches, vec![2]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn truncation_resets_and_reclears() {
         let path = tmp_file("rot.log");
         let _ = std::fs::remove_file(&path);
@@ -381,7 +436,8 @@ mod tests {
 
         let (tx, rx) = crossbeam_channel::unbounded();
         let current_gen = Arc::new(AtomicU64::new(1));
-        let mut tailer = Tailer::new(line_query(), 1, current_gen, tx).unwrap();
+        let opts = ScanOptions::default();
+        let mut tailer = Tailer::new(line_query(), &opts, 1, current_gen, tx).unwrap();
 
         tailer.tail_lines(&path);
         let first = drain(&rx);

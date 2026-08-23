@@ -112,7 +112,7 @@ fn glob_to_regex(glob: &str) -> String {
 
 /// A [`FileFilter`] with its name pattern compiled and its age bound resolved to
 /// an absolute time, ready to test candidate files.
-struct CompiledFilter {
+pub(crate) struct CompiledFilter {
     name: Option<regex::Regex>,
     include_exts: Vec<String>,
     exclude_exts: Vec<String>,
@@ -123,7 +123,7 @@ struct CompiledFilter {
 }
 
 impl CompiledFilter {
-    fn new(f: &FileFilter, now: SystemTime) -> Self {
+    pub(crate) fn new(f: &FileFilter, now: SystemTime) -> Self {
         let name = if f.name_pattern.is_empty() {
             None
         } else {
@@ -156,7 +156,7 @@ impl CompiledFilter {
     }
 
     /// Whether any check is active — lets the walker skip work when unfiltered.
-    fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.name.is_some()
             || !self.include_exts.is_empty()
             || !self.exclude_exts.is_empty()
@@ -173,10 +173,18 @@ impl CompiledFilter {
             || self.modified_before.is_some()
     }
 
-    /// Does this file pass the filter?
-    fn accepts(&self, entry: &DirEntry) -> bool {
-        let path = entry.path();
+    /// Does this walked entry pass the filter? Uses the walk's cached metadata.
+    pub(crate) fn accepts(&self, entry: &DirEntry) -> bool {
+        self.accepts_inner(entry.path(), || entry.metadata().ok())
+    }
 
+    /// Path-based variant for watch mode, where there's no `DirEntry` — stats
+    /// the file fresh only if a size/date bound needs it.
+    pub(crate) fn accepts_path(&self, path: &Path) -> bool {
+        self.accepts_inner(path, || std::fs::metadata(path).ok())
+    }
+
+    fn accepts_inner(&self, path: &Path, meta: impl FnOnce() -> Option<std::fs::Metadata>) -> bool {
         // Extension include/exclude (cheap, from the path).
         if !self.include_exts.is_empty() || !self.exclude_exts.is_empty() {
             let ext = path
@@ -205,9 +213,9 @@ impl CompiledFilter {
 
         // Size / age (needs a stat, so only when those bounds are set).
         if self.needs_metadata() {
-            let md = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => return false,
+            let md = match meta() {
+                Some(m) => m,
+                None => return false,
             };
             let size = md.len();
             if self.min_size.is_some_and(|min| size < min) {
@@ -271,9 +279,20 @@ pub(crate) struct CompiledQuery {
     excluded: Vec<RegexMatcher>,
     primary: RegexMatcher,
     time: Option<CompiledTime>,
+    /// Whether a line found by `primary` still needs the full-query recheck.
+    /// False for the common single-term, no-exclusion query — grep-searcher
+    /// matching `primary` already proves the whole query, so the line-mode fast
+    /// path can skip re-running `unit_matches` on every hit.
+    recheck: bool,
 }
 
 impl CompiledQuery {
+    /// Attach the entry-time filter from scan options (if any). Used by both the
+    /// live scan and watch mode so they filter matches identically.
+    pub(crate) fn attach_time(&mut self, time: &Option<TimeFilter>) {
+        self.time = time.as_ref().and_then(CompiledTime::new);
+    }
+
     /// Does `bytes` satisfy all required matchers and no excluded matcher?
     pub(crate) fn unit_matches(&self, bytes: &[u8]) -> bool {
         self.required
@@ -400,11 +419,13 @@ pub(crate) fn build_compiled(query: &Query) -> Result<CompiledQuery, String> {
         .map(|w| build_one(&literal_term(w, ww), query.case))
         .collect::<Result<_, _>>()?;
     let primary = required[0].clone();
+    let recheck = required.len() > 1 || !excluded.is_empty();
     Ok(CompiledQuery {
         required,
         excluded,
         primary,
         time: None,
+        recheck,
     })
 }
 
@@ -425,7 +446,7 @@ pub fn search(
     let compiled = match build_compiled(query) {
         Ok(mut c) => {
             // Attach the entry-time filter (if any) from the scan options.
-            c.time = opts.time.as_ref().and_then(CompiledTime::new);
+            c.attach_time(&opts.time);
             Arc::new(c)
         }
         Err(e) => {
@@ -475,6 +496,9 @@ pub fn search(
         let registry = registry.clone();
         let filter = filter.clone();
         let scanned = scanned.clone();
+        // One reusable line searcher per worker thread (line mode) — avoids
+        // rebuilding grep-searcher's buffers for every file in the walk.
+        let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
         Box::new(move |result| {
             // Cancelled? A newer search has started.
             if current_gen.load(Ordering::Relaxed) != generation {
@@ -516,7 +540,14 @@ pub fn search(
                     Some(bs) => {
                         search_file_blocks(&compiled, &path, bs, generation, &current_gen, &tx)
                     }
-                    None => search_file_lines(&compiled, &path, generation, &current_gen, &tx),
+                    None => search_file_lines(
+                        &mut searcher,
+                        &compiled,
+                        &path,
+                        generation,
+                        &current_gen,
+                        &tx,
+                    ),
                 },
                 // Decoded binary format: search the materialized text.
                 Ok(Some(Source::Materialized(text))) => {
@@ -558,13 +589,13 @@ pub fn search(
 /// grep-searcher scans for the `primary` matcher; the sink then verifies the
 /// full compiled query (all required, no excluded) on each candidate line.
 fn search_file_lines(
+    searcher: &mut Searcher,
     compiled: &CompiledQuery,
     path: &Path,
     generation: u64,
     current_gen: &Arc<AtomicU64>,
     tx: &Sender<SearchEvent>,
 ) -> WalkState {
-    let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
     let sink = MatchSink {
         compiled,
         path,
@@ -730,9 +761,10 @@ impl<'a> Sink for MatchSink<'a> {
         if self.stop || self.current_gen.load(Ordering::Relaxed) != self.generation {
             return Ok(false);
         }
-        // grep-searcher matched the primary term; confirm the full query (all
-        // required, no excluded) before emitting.
-        if !self.compiled.unit_matches(mat.bytes()) {
+        // grep-searcher matched the primary term. For a single-term query with
+        // no exclusions that already proves the whole query; otherwise confirm
+        // the full query (all required, no excluded) before emitting.
+        if self.compiled.recheck && !self.compiled.unit_matches(mat.bytes()) {
             return Ok(true);
         }
         let text = String::from_utf8_lossy(mat.bytes())
