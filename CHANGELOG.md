@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/StruisICT/InSearch/compare/v0.3.0...v0.3.1) (2026-08-23)
+
+
+### Features
+
+* **gui:** About window (Struis ICT, source, license, coffee link) ([16a1e80](https://github.com/StruisICT/InSearch/commit/16a1e80e13b43f8e0f7f42b14fc6989955410415))
+
 ## [0.3.0](https://github.com/StruisICT/InSearch/compare/v0.2.2...v0.3.0) (2026-08-22)
 
 
