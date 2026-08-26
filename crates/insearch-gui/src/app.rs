@@ -1138,11 +1138,6 @@ impl App {
                     .strong()
                     .size(20.0),
             );
-            ui.label(
-                egui::RichText::new("Struis ICT")
-                    .color(pal.subtext)
-                    .size(12.0),
-            );
             ui.separator();
             if ui
                 .selectable_label(self.mode == Mode::Live, "Live")
@@ -1219,6 +1214,29 @@ impl App {
             }
         });
 
+        // Folders (directly under the query), a divider, then recent/saved.
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Folders:");
+            if ui.button("➕ Add folder").clicked() {
+                self.add_folder();
+            }
+            let mut remove: Option<usize> = None;
+            for (i, r) in self.roots.iter().enumerate() {
+                ui.group(|ui| {
+                    ui.label(r.display().to_string());
+                    if ui.small_button("✖").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                self.roots.remove(i);
+                self.launch_search();
+            }
+        });
+        ui.separator();
+        self.session_bar(ui);
+
         // Options row.
         ui.horizontal(|ui| {
             let mut changed = false;
@@ -1293,30 +1311,6 @@ impl App {
         if self.show_filters {
             self.filters_ui(ui);
         }
-
-        // Roots row.
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Folders:");
-            if ui.button("➕ Add folder").clicked() {
-                self.add_folder();
-            }
-            let mut remove: Option<usize> = None;
-            for (i, r) in self.roots.iter().enumerate() {
-                ui.group(|ui| {
-                    ui.label(r.display().to_string());
-                    if ui.small_button("✖").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                self.roots.remove(i);
-                self.launch_search();
-            }
-        });
-
-        // Recent / saved searches.
-        self.session_bar(ui);
     }
 
     fn status_line(&self) -> String {
@@ -1417,10 +1411,22 @@ impl App {
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Made by");
-                        ui.hyperlink_to("Struis ICT", "https://struisict.com");
+                        if ui
+                            .link("Struis ICT")
+                            .on_hover_text("https://struisict.com")
+                            .clicked()
+                        {
+                            super::reveal::open_url("https://struisict.com");
+                        }
                         ui.end_row();
                         ui.label("Source");
-                        ui.hyperlink_to("GitHub", "https://github.com/StruisICT/InSearch");
+                        if ui
+                            .link("GitHub")
+                            .on_hover_text("https://github.com/StruisICT/InSearch")
+                            .clicked()
+                        {
+                            super::reveal::open_url("https://github.com/StruisICT/InSearch");
+                        }
                         ui.end_row();
                         ui.label("License");
                         ui.label("MIT");
@@ -1432,7 +1438,13 @@ impl App {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label("Enjoying InSearch?");
-                    ui.hyperlink_to("☕ Buy me a coffee", "https://buymeacoffee.com/struis112");
+                    if ui
+                        .link("☕ Buy me a coffee")
+                        .on_hover_text("https://buymeacoffee.com/struis112")
+                        .clicked()
+                    {
+                        super::reveal::open_url("https://buymeacoffee.com/struis112");
+                    }
                 });
                 ui.add_space(4.0);
                 ui.label(

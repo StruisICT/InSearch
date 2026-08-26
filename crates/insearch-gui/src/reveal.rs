@@ -5,6 +5,25 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Open a URL in the default browser. Used instead of egui's built-in link
+/// handling, which is inert here (eframe is built with `default-features =
+/// false`, so egui-winit's URL-opening `links` feature is off).
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    {
+        // `cmd /C start "" "<url>"` — the empty "" is start's window-title arg.
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
 /// Open `path` with the default application.
 pub fn open_path(path: &Path) {
     #[cfg(windows)]
