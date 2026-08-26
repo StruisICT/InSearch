@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/StruisICT/InSearch/compare/v0.4.0...v0.4.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **gui:** working About links, top-bar reorder, drop title subtitle ([8295f58](https://github.com/StruisICT/InSearch/commit/8295f587163057c2bce62238ad5b1e33b8487d32))
+
 ## [0.4.0](https://github.com/StruisICT/InSearch/compare/v0.3.1...v0.4.0) (2026-08-23)
 
 
