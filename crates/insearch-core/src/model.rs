@@ -1,6 +1,7 @@
 //! Shared data types for the search engine.
 
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 
 /// How a file's text is divided into searchable units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -76,7 +77,9 @@ impl Query {
 /// A single search hit.
 #[derive(Clone, Debug)]
 pub struct Match {
-    pub path: PathBuf,
+    /// The file the hit is in. `Arc<Path>` so every match in a file shares one
+    /// path allocation (a match-heavy file emits thousands of hits).
+    pub path: Arc<Path>,
     /// 1-based line number where the matched unit starts.
     pub line_start: u64,
     /// 1-based line number where the matched unit ends (== `line_start` for

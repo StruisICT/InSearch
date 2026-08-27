@@ -290,12 +290,14 @@ impl Tailer {
         let base_line = line_base;
         let mut local_line: u64 = 0;
         let mut byte_in_chunk: u64 = 0;
+        // Allocate the path once; the appended lines share it.
+        let match_path: std::sync::Arc<Path> = std::sync::Arc::from(path);
         for line in text.split_inclusive('\n') {
             local_line += 1;
             let content = strip_eol(line);
             if self.compiled.unit_matches(content.as_bytes()) && self.compiled.time_ok(content) {
                 let m = Match {
-                    path: path.to_path_buf(),
+                    path: match_path.clone(),
                     line_start: base_line + local_line,
                     line_end: base_line + local_line,
                     byte_offset: start + byte_in_chunk,

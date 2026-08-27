@@ -598,7 +598,7 @@ fn search_file_lines(
 ) -> WalkState {
     let sink = MatchSink {
         compiled,
-        path,
+        path: Arc::from(path),
         generation,
         current_gen,
         tx,
@@ -658,6 +658,8 @@ pub(crate) fn search_text_blocks(
     current_gen: &Arc<AtomicU64>,
     tx: &Sender<SearchEvent>,
 ) -> bool {
+    // Allocate the path once; every block match in this file shares it.
+    let path: Arc<Path> = Arc::from(path);
     let mut cancelled = false;
     splitter.split(text, &mut |unit| {
         if current_gen.load(Ordering::Relaxed) != generation {
@@ -677,7 +679,7 @@ pub(crate) fn search_text_blocks(
                 display.push('…');
             }
             let m = Match {
-                path: path.to_path_buf(),
+                path: path.clone(),
                 line_start: unit.line_start,
                 line_end: unit.line_end,
                 byte_offset: unit.byte_offset,
@@ -705,6 +707,8 @@ pub(crate) fn search_text_lines(
     current_gen: &Arc<AtomicU64>,
     tx: &Sender<SearchEvent>,
 ) -> bool {
+    // Allocate the path once; every line match in this file shares it.
+    let path: Arc<Path> = Arc::from(path);
     let mut byte_offset: u64 = 0;
     for (idx, line) in text.split_inclusive('\n').enumerate() {
         if current_gen.load(Ordering::Relaxed) != generation {
@@ -714,7 +718,7 @@ pub(crate) fn search_text_lines(
         if compiled.unit_matches(content.as_bytes()) && compiled.time_ok(content) {
             let ln = idx as u64 + 1;
             let m = Match {
-                path: path.to_path_buf(),
+                path: path.clone(),
                 line_start: ln,
                 line_end: ln,
                 byte_offset,
@@ -747,7 +751,7 @@ fn first_matching_line(matcher: &RegexMatcher, unit: &Unit<'_>) -> Option<u64> {
 /// and applies backpressure by riding the bounded channel's blocking send.
 struct MatchSink<'a> {
     compiled: &'a CompiledQuery,
-    path: &'a Path,
+    path: Arc<Path>,
     generation: u64,
     current_gen: &'a Arc<AtomicU64>,
     tx: &'a Sender<SearchEvent>,
@@ -778,7 +782,7 @@ impl<'a> Sink for MatchSink<'a> {
         let line_start = mat.line_number().unwrap_or(0);
         let byte_offset = mat.absolute_byte_offset();
         let m = Match {
-            path: self.path.to_path_buf(),
+            path: self.path.clone(),
             line_start,
             line_end: line_start,
             byte_offset,

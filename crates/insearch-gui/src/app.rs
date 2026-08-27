@@ -394,6 +394,8 @@ pub struct App {
     view: ResultView,
     /// Per-path filesystem metadata (size/modified), computed once per search.
     meta_cache: RefCell<HashMap<PathBuf, FileMeta>>,
+    /// Per-path (file_name, path_display) strings, formatted once per file.
+    disp_cache: RefCell<HashMap<std::sync::Arc<Path>, (String, String)>>,
     truncated: bool,
     error: Option<String>,
     /// Compiled from the active query to highlight matches in result previews.
@@ -445,7 +447,7 @@ struct PendingWatch {
 /// (size/modified) is *not* here — it's statted lazily, only for the visible
 /// rows of the Detailed view, so plain searches never touch the filesystem.
 struct ResultRow {
-    path: PathBuf,
+    path: std::sync::Arc<std::path::Path>,
     file_name: String,
     path_display: String,
     line_label: String,
@@ -517,6 +519,7 @@ impl App {
             results: Vec::new(),
             view,
             meta_cache: RefCell::new(HashMap::new()),
+            disp_cache: RefCell::new(HashMap::new()),
             truncated: false,
             error: None,
             highlight: None,
@@ -615,14 +618,23 @@ impl App {
         meta
     }
 
-    /// Build a display row from a raw match. Cheap: no filesystem access.
-    fn make_row(m: Match) -> ResultRow {
-        let file_name = m
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let path_display = m.path.display().to_string();
+    /// Build a display row from a raw match. Cheap: no filesystem access. The
+    /// file-name / path strings are cached per path, so a file with thousands of
+    /// matches formats them once, not once per hit.
+    fn make_row(&self, m: Match) -> ResultRow {
+        let (file_name, path_display) = self
+            .disp_cache
+            .borrow_mut()
+            .entry(m.path.clone())
+            .or_insert_with(|| {
+                let file_name = m
+                    .path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (file_name, m.path.display().to_string())
+            })
+            .clone();
         // A multi-line block match shows a line range and a "match on line N"
         // hover; a single-line match shows just the number.
         let (line_label, line_hover) = if m.line_end > m.line_start {
@@ -773,6 +785,7 @@ impl App {
         self.active_generation = g;
         self.results.clear();
         self.meta_cache.borrow_mut().clear();
+        self.disp_cache.borrow_mut().clear();
         self.truncated = false;
         self.error = None;
         self.status_notice = None;
@@ -856,7 +869,7 @@ impl App {
                 SearchEvent::Match(g, m) => {
                     if g == self.active_generation {
                         if self.results.len() < MAX_RESULTS {
-                            let row = Self::make_row(m);
+                            let row = self.make_row(m);
                             self.results.push(row);
                         } else {
                             self.truncated = true;
@@ -865,7 +878,7 @@ impl App {
                 }
                 SearchEvent::Clear(g, path) => {
                     if g == self.active_generation {
-                        self.results.retain(|r| r.path != path);
+                        self.results.retain(|r| r.path.as_ref() != path.as_path());
                         // Removing rows may reopen room under the cap.
                         if self.truncated && self.results.len() < MAX_RESULTS {
                             self.truncated = false;
