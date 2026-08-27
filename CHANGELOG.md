@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/StruisICT/InSearch/compare/v0.4.1...v0.5.0) (2026-08-27)
+
+
+### Features
+
+* **cli:** filters, match modes, block, entry-time, and json/count/-l output ([c4a8c40](https://github.com/StruisICT/InSearch/commit/c4a8c40c7ea0f4ef9ad8cbe6da0dae2be28c6049))
+* **gui:** preview pane for the selected result ([e98b381](https://github.com/StruisICT/InSearch/commit/e98b381cad19d88d5250506e0c5ad17157967999))
+* **gui:** sortable result columns ([88082c6](https://github.com/StruisICT/InSearch/commit/88082c61264689cce7085e06ca0e5988ea6fdf0a))
+
+
+### Performance Improvements
+
+* share match paths via Arc&lt;Path&gt;; cache GUI display strings ([c15df06](https://github.com/StruisICT/InSearch/commit/c15df06f2f368a973dae9846ec8c55707ae6a6e1))
+
 ## [0.4.1](https://github.com/StruisICT/InSearch/compare/v0.4.0...v0.4.1) (2026-08-26)
 
 
