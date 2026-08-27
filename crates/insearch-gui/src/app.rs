@@ -284,6 +284,39 @@ struct FileMeta {
     size_label: String,
     modified_label: String,
     modified_hover: String,
+    /// Raw values for correct numeric / chronological sorting.
+    size_bytes: u64,
+    modified_epoch: i64,
+}
+
+/// Which column the results table is sorted by.
+#[derive(Clone, Copy, PartialEq)]
+enum SortKey {
+    File,
+    Folder,
+    Size,
+    Modified,
+    Line,
+    Text,
+}
+
+/// A clickable table header showing a ▲/▼ arrow when it's the active sort column.
+fn sort_header(
+    ui: &mut egui::Ui,
+    label: &str,
+    key: SortKey,
+    sort: Option<(SortKey, bool)>,
+) -> egui::Response {
+    let arrow = match sort {
+        Some((k, true)) if k == key => " ▲",
+        Some((k, false)) if k == key => " ▼",
+        _ => "",
+    };
+    ui.add(
+        egui::Label::new(egui::RichText::new(format!("{label}{arrow}")).strong())
+            .sense(egui::Sense::click()),
+    )
+    .on_hover_text("Click to sort (asc → desc → off)")
 }
 
 /// Export file formats for the results list.
@@ -392,6 +425,8 @@ pub struct App {
     results: Vec<ResultRow>,
     /// How the results table is rendered (compact vs. detailed).
     view: ResultView,
+    /// Column sort: `Some((key, ascending))`, or `None` for as-found order.
+    sort: Option<(SortKey, bool)>,
     /// Per-path filesystem metadata (size/modified), computed once per search.
     meta_cache: RefCell<HashMap<PathBuf, FileMeta>>,
     /// Per-path (file_name, path_display) strings, formatted once per file.
@@ -450,6 +485,8 @@ struct ResultRow {
     path: std::sync::Arc<std::path::Path>,
     file_name: String,
     path_display: String,
+    /// 1-based start line, kept numeric for correct sorting by Line.
+    line_start: u64,
     line_label: String,
     line_hover: Option<String>,
     preview: String,
@@ -518,6 +555,7 @@ impl App {
             watch_handle: None,
             results: Vec::new(),
             view,
+            sort: None,
             meta_cache: RefCell::new(HashMap::new()),
             disp_cache: RefCell::new(HashMap::new()),
             truncated: false,
@@ -599,18 +637,27 @@ impl App {
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let (size_label, modified_label, modified_hover) = match std::fs::metadata(path) {
-            Ok(md) => {
-                let (date, full) = md.modified().ok().map(format_mtime).unwrap_or_default();
-                (human_size(md.len()), date, full)
-            }
-            Err(_) => (String::new(), String::new(), String::new()),
-        };
+        let (size_label, modified_label, modified_hover, size_bytes, modified_epoch) =
+            match std::fs::metadata(path) {
+                Ok(md) => {
+                    let (date, full) = md.modified().ok().map(format_mtime).unwrap_or_default();
+                    let epoch = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    (human_size(md.len()), date, full, md.len(), epoch)
+                }
+                Err(_) => (String::new(), String::new(), String::new(), 0, 0),
+            };
         let meta = FileMeta {
             dir_display,
             size_label,
             modified_label,
             modified_hover,
+            size_bytes,
+            modified_epoch,
         };
         self.meta_cache
             .borrow_mut()
@@ -651,6 +698,7 @@ impl App {
             path: m.path,
             file_name,
             path_display,
+            line_start: m.line_start,
             line_label,
             line_hover,
             preview,
@@ -1648,7 +1696,7 @@ impl App {
     /// Indices into `results` currently visible under the in-place result filter.
     fn visible_indices(&self) -> Vec<usize> {
         let f = self.result_filter.trim().to_ascii_lowercase();
-        if f.is_empty() {
+        let mut idx: Vec<usize> = if f.is_empty() {
             (0..self.results.len()).collect()
         } else {
             self.results
@@ -1660,7 +1708,45 @@ impl App {
                 })
                 .map(|(i, _)| i)
                 .collect()
+        };
+        // Column sort (stable). Size/Modified read cached file metadata (one stat
+        // per file, cached) — only when the user actually sorts by them.
+        if let Some((key, asc)) = self.sort {
+            let dir_of = |r: &ResultRow| {
+                r.path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default()
+            };
+            match key {
+                SortKey::File => {
+                    idx.sort_by_cached_key(|&i| self.results[i].file_name.to_ascii_lowercase())
+                }
+                SortKey::Folder => idx.sort_by_cached_key(|&i| dir_of(&self.results[i])),
+                SortKey::Line => idx.sort_by_cached_key(|&i| self.results[i].line_start),
+                SortKey::Text => {
+                    idx.sort_by_cached_key(|&i| self.results[i].preview.to_ascii_lowercase())
+                }
+                SortKey::Size => {
+                    idx.sort_by_cached_key(|&i| self.file_meta(&self.results[i].path).size_bytes)
+                }
+                SortKey::Modified => idx
+                    .sort_by_cached_key(|&i| self.file_meta(&self.results[i].path).modified_epoch),
+            }
+            if !asc {
+                idx.reverse();
+            }
         }
+        idx
+    }
+
+    /// Cycle a column's sort: none → ascending → descending → none.
+    fn toggle_sort(&mut self, key: SortKey) {
+        self.sort = match self.sort {
+            Some((k, true)) if k == key => Some((key, false)),
+            Some((k, false)) if k == key => None,
+            _ => Some((key, true)),
+        };
     }
 
     /// The currently-visible results as `path:line: text` lines (for the
@@ -1677,8 +1763,9 @@ impl App {
         s
     }
 
-    fn results_table(&self, ui: &mut egui::Ui) {
+    fn results_table(&self, ui: &mut egui::Ui) -> Option<SortKey> {
         let visible = self.visible_indices();
+        let mut clicked: Option<SortKey> = None;
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size + 6.0;
         let detailed = self.view == ResultView::Detailed;
         let link = super::palette::palette(self.dark).blue;
@@ -1700,25 +1787,38 @@ impl App {
 
         builder
             .header(20.0, |mut header| {
+                let s = self.sort;
                 header.col(|ui| {
-                    ui.strong("File");
+                    if sort_header(ui, "File", SortKey::File, s).clicked() {
+                        clicked = Some(SortKey::File);
+                    }
                 });
                 if detailed {
                     header.col(|ui| {
-                        ui.strong("Folder");
+                        if sort_header(ui, "Folder", SortKey::Folder, s).clicked() {
+                            clicked = Some(SortKey::Folder);
+                        }
                     });
                     header.col(|ui| {
-                        ui.strong("Size");
+                        if sort_header(ui, "Size", SortKey::Size, s).clicked() {
+                            clicked = Some(SortKey::Size);
+                        }
                     });
                     header.col(|ui| {
-                        ui.strong("Modified");
+                        if sort_header(ui, "Modified", SortKey::Modified, s).clicked() {
+                            clicked = Some(SortKey::Modified);
+                        }
                     });
                 }
                 header.col(|ui| {
-                    ui.strong("Line");
+                    if sort_header(ui, "Line", SortKey::Line, s).clicked() {
+                        clicked = Some(SortKey::Line);
+                    }
                 });
                 header.col(|ui| {
-                    ui.strong("Match");
+                    if sort_header(ui, "Match", SortKey::Text, s).clicked() {
+                        clicked = Some(SortKey::Text);
+                    }
                 });
             })
             .body(|body| {
@@ -1815,6 +1915,7 @@ impl App {
                     });
                 });
             });
+        clicked
     }
 }
 
@@ -1891,7 +1992,9 @@ impl eframe::App for App {
                 } else {
                     self.results_toolbar(ui);
                     ui.add_space(4.0);
-                    self.results_table(ui);
+                    if let Some(key) = self.results_table(ui) {
+                        self.toggle_sort(key);
+                    }
                 }
             });
 
