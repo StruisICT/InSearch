@@ -134,6 +134,16 @@ jobs:
         shell: bash
         run: cp signed-msi/*.msi "$(ls dist/*.msi)"
 
+      # SHA256 checksums for the (final, possibly-signed) downloads, so users can
+      # verify integrity — a cheap trust signal while the binaries are unsigned.
+      - name: Checksums
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          cd dist
+          sha256sum InSearch.exe insearch-cli.exe *.msi > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - uses: actions/upload-artifact@v4
         with:
           name: insearch-windows
@@ -146,3 +156,4 @@ jobs:
           files: |
             dist/*.exe
             dist/*.msi
+            dist/SHA256SUMS.txt
