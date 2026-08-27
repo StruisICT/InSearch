@@ -39,9 +39,11 @@ const PREFS_KEY: &str = "insearch_prefs";
 /// Preferences persisted across sessions via eframe storage (window geometry is
 /// handled separately by eframe itself).
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct Prefs {
     dark: bool,
     detailed: bool,
+    preview: bool,
     roots: Vec<PathBuf>,
 }
 
@@ -50,6 +52,7 @@ impl Default for Prefs {
         Prefs {
             dark: true,
             detailed: false,
+            preview: false,
             roots: Vec::new(),
         }
     }
@@ -300,6 +303,17 @@ enum SortKey {
     Text,
 }
 
+/// One preview line: `(line number, text, is-the-matched-line)`.
+type PreviewLine = (u64, String, bool);
+
+/// Cached preview-pane content for the currently selected result.
+#[derive(Default)]
+struct Preview {
+    /// Which result row (index into `results`) these lines were computed for.
+    for_row: Option<usize>,
+    lines: Vec<PreviewLine>,
+}
+
 /// A clickable table header showing a ▲/▼ arrow when it's the active sort column.
 fn sort_header(
     ui: &mut egui::Ui,
@@ -427,6 +441,12 @@ pub struct App {
     view: ResultView,
     /// Column sort: `Some((key, ascending))`, or `None` for as-found order.
     sort: Option<(SortKey, bool)>,
+    /// Selected result row (index into `results`) for the preview pane.
+    selected: Option<usize>,
+    /// Whether the preview pane is shown.
+    show_preview: bool,
+    /// Cached preview-pane content for the selected row.
+    preview: RefCell<Preview>,
     /// Per-path filesystem metadata (size/modified), computed once per search.
     meta_cache: RefCell<HashMap<PathBuf, FileMeta>>,
     /// Per-path (file_name, path_display) strings, formatted once per file.
@@ -487,6 +507,8 @@ struct ResultRow {
     path_display: String,
     /// 1-based start line, kept numeric for correct sorting by Line.
     line_start: u64,
+    /// 1-based end line (== start in line mode; the block span in block mode).
+    line_end: u64,
     line_label: String,
     line_hover: Option<String>,
     preview: String,
@@ -556,6 +578,9 @@ impl App {
             results: Vec::new(),
             view,
             sort: None,
+            selected: None,
+            show_preview: prefs.preview,
+            preview: RefCell::new(Preview::default()),
             meta_cache: RefCell::new(HashMap::new()),
             disp_cache: RefCell::new(HashMap::new()),
             truncated: false,
@@ -699,6 +724,7 @@ impl App {
             file_name,
             path_display,
             line_start: m.line_start,
+            line_end: m.line_end,
             line_label,
             line_hover,
             preview,
@@ -834,6 +860,8 @@ impl App {
         self.results.clear();
         self.meta_cache.borrow_mut().clear();
         self.disp_cache.borrow_mut().clear();
+        self.selected = None;
+        *self.preview.borrow_mut() = Preview::default();
         self.truncated = false;
         self.error = None;
         self.status_notice = None;
@@ -1606,6 +1634,9 @@ impl App {
             ui.selectable_value(&mut self.view, ResultView::Detailed, "Detailed")
                 .on_hover_text("Adds Folder · Size · Modified columns");
             ui.separator();
+            ui.toggle_value(&mut self.show_preview, "⧉ Preview")
+                .on_hover_text("Show a pane previewing the selected result in context");
+            ui.separator();
             ui.menu_button("Export ▾", |ui| {
                 if ui.button("CSV").clicked() {
                     export = Some(ExportFormat::Csv);
@@ -1763,9 +1794,116 @@ impl App {
         s
     }
 
-    fn results_table(&self, ui: &mut egui::Ui) -> Option<SortKey> {
+    /// Read a window of lines around a result's match, for the preview pane.
+    /// Returns `(line_no, text, is_matched_line)`.
+    fn compute_preview(&self, r: &ResultRow) -> Vec<PreviewLine> {
+        const CONTEXT: u64 = 4;
+        const MAX_BYTES: usize = 16 * 1024 * 1024;
+        const MAX_LINES: usize = 80;
+        let bytes = match std::fs::read(r.path.as_ref()) {
+            Ok(b) if b.len() <= MAX_BYTES => b,
+            Ok(_) => return vec![(0, "(file too large to preview)".into(), false)],
+            Err(e) => return vec![(0, format!("(cannot read file: {e})"), false)],
+        };
+        if bytes.iter().take(8192).any(|&b| b == 0) {
+            return vec![(0, "(binary file — no preview)".into(), false)];
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let start = r.line_start.saturating_sub(CONTEXT).max(1);
+        let end = r.line_end.saturating_add(CONTEXT);
+        let mut out = Vec::new();
+        for (idx, line) in text.split('\n').enumerate() {
+            let ln = idx as u64 + 1;
+            if ln < start {
+                continue;
+            }
+            if ln > end || out.len() >= MAX_LINES {
+                break;
+            }
+            let is_match = ln >= r.line_start && ln <= r.line_end;
+            out.push((ln, line.trim_end_matches('\r').to_string(), is_match));
+        }
+        out
+    }
+
+    /// A resizable bottom pane previewing the selected result in context.
+    fn preview_panel(&mut self, ui: &mut egui::Ui) {
+        if !self.show_preview {
+            return;
+        }
+        let Some(sel) = self.selected.filter(|&i| i < self.results.len()) else {
+            return;
+        };
+        // (Re)compute when the selection changes; cached otherwise.
+        if self.preview.borrow().for_row != Some(sel) {
+            let lines = self.compute_preview(&self.results[sel]);
+            *self.preview.borrow_mut() = Preview {
+                for_row: Some(sel),
+                lines,
+            };
+        }
+        let pal = super::palette::palette(self.dark);
+        let hl = self.highlight.clone();
+        let header = {
+            let r = &self.results[sel];
+            format!("{}  —  line {}", r.path_display, r.line_label)
+        };
+        let mut close = false;
+        let preview = self.preview.borrow();
+        egui::Panel::bottom("preview")
+            .resizable(true)
+            .default_size(190.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.panel_bg)
+                    .inner_margin(egui::Margin::symmetric(14, 8)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Preview");
+                    ui.weak(header);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✖").on_hover_text("Hide preview").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (ln, text, is_match) in preview.lines.iter() {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new(format!("{ln:>5} "))
+                                        .monospace()
+                                        .color(pal.subtext),
+                                ));
+                                match (is_match, &hl) {
+                                    (true, Some(re)) => {
+                                        ui.label(highlight_job(ui, text, re));
+                                    }
+                                    (true, None) => {
+                                        ui.label(egui::RichText::new(text).strong());
+                                    }
+                                    (false, _) => {
+                                        ui.label(egui::RichText::new(text).color(pal.subtext));
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+        drop(preview);
+        if close {
+            self.show_preview = false;
+        }
+    }
+
+    fn results_table(&self, ui: &mut egui::Ui) -> (Option<SortKey>, Option<usize>) {
         let visible = self.visible_indices();
         let mut clicked: Option<SortKey> = None;
+        let mut select: Option<usize> = None;
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size + 6.0;
         let detailed = self.view == ResultView::Detailed;
         let link = super::palette::palette(self.dark).blue;
@@ -1823,8 +1961,10 @@ impl App {
             })
             .body(|body| {
                 body.rows(text_height, visible.len(), |mut row| {
-                    let r = &self.results[visible[row.index()]];
-                    // Double-clicking the file name (or the row) opens the file.
+                    let ridx = visible[row.index()];
+                    let r = &self.results[ridx];
+                    row.set_selected(self.selected == Some(ridx));
+                    // Single-click selects (for the preview); double-click opens.
                     let mut open = false;
 
                     row.col(|ui| {
@@ -1870,8 +2010,11 @@ impl App {
                         }
                     });
 
-                    // Row-level actions: double-click opens; right-click menu.
+                    // Row-level actions: click selects, double-click opens.
                     let resp = row.response();
+                    if resp.clicked() {
+                        select = Some(ridx);
+                    }
                     if resp.double_clicked() {
                         open = true;
                     }
@@ -1915,7 +2058,7 @@ impl App {
                     });
                 });
             });
-        clicked
+        (clicked, select)
     }
 }
 
@@ -1926,6 +2069,7 @@ impl eframe::App for App {
         let prefs = Prefs {
             dark: self.dark,
             detailed: self.view == ResultView::Detailed,
+            preview: self.show_preview,
             roots: self.roots.clone(),
         };
         eframe::set_value(storage, PREFS_KEY, &prefs);
@@ -1973,6 +2117,7 @@ impl eframe::App for App {
 
         self.settings_window(&ctx);
         self.about_window(&ctx);
+        self.preview_panel(ui);
 
         egui::CentralPanel::default()
             .frame(
@@ -1992,8 +2137,12 @@ impl eframe::App for App {
                 } else {
                     self.results_toolbar(ui);
                     ui.add_space(4.0);
-                    if let Some(key) = self.results_table(ui) {
+                    let (sort_click, sel) = self.results_table(ui);
+                    if let Some(key) = sort_click {
                         self.toggle_sort(key);
+                    }
+                    if let Some(i) = sel {
+                        self.selected = Some(i);
                     }
                 }
             });
