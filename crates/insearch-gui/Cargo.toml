@@ -32,9 +32,15 @@ serde_json = "1"
 # OS timezone/DST data). `clock` pulls in the local-zone lookup only.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
-# Windows-only: registry access for the Explorer context-menu integration.
+# Windows-only: registry access for the Explorer context-menu integration and
+# the opt-in update-check settings; WinHTTP for the update check itself (uses
+# the OS HTTPS stack — no bundled HTTP/TLS library compiled in).
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+] }
 
 # Windows-only: embed the app manifest (DPI awareness, common controls).
 [target.'cfg(windows)'.build-dependencies]

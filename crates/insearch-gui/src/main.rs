@@ -10,6 +10,7 @@ mod context_menu;
 mod palette;
 mod reveal;
 mod session;
+mod update;
 
 /// App icon, used for the window/taskbar (cross-platform). On Windows the same
 /// artwork is also embedded in the exe via `app.rc` for Explorer/context menu.

@@ -479,6 +479,9 @@ pub struct App {
     settings_msg: Option<String>,
     // About window
     show_about: bool,
+    /// Frames since launch — used to defer the startup update check until the
+    /// window has painted (so any consent dialog appears over a visible window).
+    startup_frames: u8,
 
     // Watch mode: the watcher is started only after the initial full scan
     // finishes (on `Done`), so its first-seen `Clear` can't race the scan's
@@ -597,6 +600,7 @@ impl App {
             show_settings: false,
             settings_msg: None,
             show_about: false,
+            startup_frames: 0,
             pending_watch: None,
         }
     }
@@ -1525,6 +1529,28 @@ impl App {
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
+                // Updates.
+                ui.horizontal(|ui| {
+                    if ui.button("Check for updates").clicked() {
+                        super::update::check_now();
+                    }
+                    let mut auto = super::update::auto_check_enabled();
+                    if ui
+                        .checkbox(&mut auto, "Automatically check on startup")
+                        .on_hover_text(
+                            "When on, InSearch occasionally contacts github.com over HTTPS to \
+                             see if a newer version exists. It never downloads or installs \
+                             anything, and sends nothing about you or your searches.",
+                        )
+                        .changed()
+                    {
+                        super::update::set_auto_check(auto);
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label("Enjoying InSearch?");
                     if ui
@@ -2079,6 +2105,16 @@ impl eframe::App for App {
     // *into* a `Ui` rather than onto the `Context`.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Startup update check, deferred until the window has painted (the
+        // one-time consent dialog should appear over a visible window).
+        if self.startup_frames < 3 {
+            self.startup_frames += 1;
+            ctx.request_repaint();
+            if self.startup_frames == 3 {
+                super::update::maybe_run();
+            }
+        }
 
         // Global keyboard shortcuts.
         self.handle_shortcuts(&ctx);
