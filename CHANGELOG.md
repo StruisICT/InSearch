@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/StruisICT/InSearch/compare/v0.5.0...v0.6.0) (2026-09-02)
+
+
+### Features
+
+* **gui:** opt-in update check (InLook-style) with About controls ([fea621c](https://github.com/StruisICT/InSearch/commit/fea621c3641d380b45544fbb36e56df04c3c776b))
+
 ## [0.5.0](https://github.com/StruisICT/InSearch/compare/v0.4.1...v0.5.0) (2026-08-27)
 
 
