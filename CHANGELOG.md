@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/StruisICT/InSearch/compare/v0.6.0...v0.6.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* statically link the MSVC CRT so binaries run without VCRedist ([a464eac](https://github.com/StruisICT/InSearch/commit/a464eacba868c37e27052774b370733924038405))
+
 ## [0.6.0](https://github.com/StruisICT/InSearch/compare/v0.5.0...v0.6.0) (2026-09-02)
 
 
