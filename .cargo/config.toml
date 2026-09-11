@@ -1,0 +1,7 @@
+# Statically link the MSVC C runtime so the binaries are self-contained and run
+# on a clean Windows install with no Visual C++ Redistributable. Without this
+# they depend on vcruntime140.dll and fail to start with STATUS_DLL_NOT_FOUND
+# (0xC0000135) on machines that don't have the VCRedist — which is exactly what
+# winget's clean-sandbox validation hit.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
