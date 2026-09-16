@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 insearch-core = { path = "../insearch-core", features = ["all-formats"] }
 crossbeam-channel.workspace = true
-# glow backend only (no wgpu/DirectX) — smaller binary, faster link, Linux-ready.
+# glow (OpenGL) backend everywhere; Windows additionally compiles wgpu below.
 # `persistence` = restore window geometry + our saved prefs across sessions.
 eframe = { version = "0.36", default-features = false, features = [
     "glow",
@@ -36,6 +36,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # the opt-in update-check settings; WinHTTP for the update check itself (uses
 # the OS HTTPS stack — no bundled HTTP/TLS library compiled in).
 [target.'cfg(windows)'.dependencies]
+# Windows-only: eframe's wgpu backend (DirectX 12). wgpu exposes WARP, the CPU
+# rasterizer built into Windows, so the GUI opens on GPU-less servers/VMs where
+# OpenGL is stuck at 1.1. Default renderer on Windows; glow stays selectable via
+# `--renderer glow`. (Resolver 2: this feature is ignored on non-Windows builds.)
+eframe = { version = "0.36", default-features = false, features = ["wgpu"] }
 winreg = "0.56"
 windows = { version = "0.62", features = [
     "Win32_Foundation",

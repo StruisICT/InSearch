@@ -1,13 +1,16 @@
 //! InSearch — egui desktop front-end.
 //!
 //! Launch with an optional path argument (used by the Windows Explorer
-//! "Search with InSearch" entry, added in a later phase) to prefill the
-//! search root: `insearch-gui "C:\logs"`.
+//! "Search with InSearch" entry) to prefill the search root:
+//! `insearch-gui "C:\logs"`.
+//!
+//! Renderer flags (see `renderer.rs`): `--renderer glow|wgpu`, `--software-gpu`.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod context_menu;
 mod palette;
+mod renderer;
 mod reveal;
 mod session;
 mod update;
@@ -16,17 +19,14 @@ mod update;
 /// artwork is also embedded in the exe via `app.rc` for Explorer/context menu.
 const ICON_PNG: &[u8] = include_bytes!("../icon-256.png");
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use eframe::egui;
 
 fn main() -> ExitCode {
-    // First non-flag argument is an initial search root, if any.
-    let initial_root: Option<PathBuf> = std::env::args()
-        .skip(1)
-        .find(|a| !a.starts_with('-'))
-        .map(PathBuf::from);
+    let args = renderer::parse_args();
+    let choice = args.renderer;
+    let initial_root = args.root;
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 700.0])
@@ -36,10 +36,14 @@ fn main() -> ExitCode {
         viewport = viewport.with_icon(icon);
     }
 
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+    if let Err(err) = renderer::apply(&choice, &mut native_options) {
+        eprintln!("InSearch: {err}");
+        return ExitCode::FAILURE;
+    }
 
     match eframe::run_native(
         "InSearch",
@@ -48,18 +52,60 @@ fn main() -> ExitCode {
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            // Reaching here almost always means the windowing / OpenGL (glow) context
-            // failed to initialise — a headless VM, an RDP session without hardware
-            // acceleration, or a stale graphics driver. That's an environment
-            // limitation, not a fault in InSearch, so report it and exit cleanly
-            // rather than propagating a non-zero code. (Propagating would also trip
-            // winget's install-time executable validation, which launches the exe on
-            // a GPU-less runner.)
             eprintln!(
-                "InSearch could not open a window: {err}\n\
-                 This usually means no GPU/display is available (headless server, RDP \
-                 without hardware acceleration, or an outdated graphics driver)."
+                "InSearch could not open a window with the {} renderer: {err}",
+                choice.backend.name()
             );
+
+            // The default wgpu path (DirectX 12, WARP fallback) should start
+            // anywhere Windows has a desktop. If it still failed, give the
+            // OpenGL backend one shot in a fresh process — winit refuses to
+            // create a second event loop in this one. An explicit choice is
+            // respected as-is.
+            if choice.backend == renderer::Backend::Wgpu && !choice.explicit {
+                eprintln!("InSearch: retrying with the glow (OpenGL) renderer…");
+                return relaunch_with_glow(&args.passthrough);
+            }
+
+            // Reaching here means no windowing/graphics context could be
+            // created at all — a headless session, a service context, or a
+            // broken driver. That's an environment limitation, not a fault in
+            // InSearch, so report it and exit cleanly rather than propagate a
+            // non-zero code. (Propagating would also trip winget's install-time
+            // executable validation, which launches the exe on a GPU-less runner.)
+            eprintln!(
+                "This usually means no display is available (headless server or service \
+                 session) or the graphics driver is broken. Try `--software-gpu` or \
+                 `--renderer glow`; the `insearch-cli` tool works without a display."
+            );
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Re-run this executable with `--renderer glow` plus the original non-renderer
+/// arguments, and mirror its exit status.
+fn relaunch_with_glow(passthrough: &[String]) -> ExitCode {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("InSearch: cannot locate own executable for relaunch: {err}");
+            return ExitCode::SUCCESS;
+        }
+    };
+    match std::process::Command::new(exe)
+        .arg("--renderer")
+        .arg("glow")
+        .args(passthrough)
+        .status()
+    {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => {
+            eprintln!("InSearch: glow relaunch exited with {status}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("InSearch: glow relaunch failed to start: {err}");
             ExitCode::SUCCESS
         }
     }

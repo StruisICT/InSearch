@@ -479,6 +479,9 @@ pub struct App {
     settings_msg: Option<String>,
     // About window
     show_about: bool,
+    /// What we draw with ("DirectX 12 · <adapter>" / "OpenGL (glow)"), for the
+    /// About window — lets a user tell WARP software rendering from a GPU.
+    renderer_info: String,
     /// Frames since launch — used to defer the startup update check until the
     /// window has painted (so any consent dialog appears over a visible window).
     startup_frames: u8,
@@ -600,6 +603,7 @@ impl App {
             show_settings: false,
             settings_msg: None,
             show_about: false,
+            renderer_info: super::renderer::describe(cc),
             startup_frames: 0,
             pending_watch: None,
         }
@@ -1523,6 +1527,12 @@ impl App {
                         ui.end_row();
                         ui.label("License");
                         ui.label("MIT");
+                        ui.end_row();
+                        ui.label("Renderer");
+                        ui.label(&self.renderer_info).on_hover_text(
+                            "Override with `--renderer glow|wgpu` or `--software-gpu` \
+                             (or INSEARCH_RENDERER / INSEARCH_SOFTWARE_GPU=1).",
+                        );
                         ui.end_row();
                     });
 
