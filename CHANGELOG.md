@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/StruisICT/InSearch/compare/v0.6.1...v0.7.0) (2026-09-16)
+
+
+### Features
+
+* default excluded types, skip-hidden and skip-system-folders toggles ([#14](https://github.com/StruisICT/InSearch/issues/14)) ([956aecd](https://github.com/StruisICT/InSearch/commit/956aecd17a15e264592f4f613f07eeb49dedef80))
+* **gui:** render with wgpu/DirectX 12 on Windows, WARP fallback for GPU-less machines ([#13](https://github.com/StruisICT/InSearch/issues/13)) ([8506548](https://github.com/StruisICT/InSearch/commit/850654863396566b5f0ec867f58615d579b72419))
+
 ## [0.6.1](https://github.com/StruisICT/InSearch/compare/v0.6.0...v0.6.1) (2026-09-11)
 
 
