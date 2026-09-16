@@ -29,6 +29,8 @@ Working, and reasonably featureful.
 **Files & formats**
 - [x] Binary extractors: xls / xlsx / ods, docx, pdf (behind cargo features)
 - [x] File filters: name glob/regex, extension include/exclude, size, modified-within-N-days
+- [x] Remembered search defaults: a global excluded-types list, **Skip hidden**,
+      **Skip system folders** (Windows-owned folders at a drive root)
 
 **Results & session**
 - [x] Double-click to open · right-click to reveal / copy path / copy text
@@ -38,6 +40,8 @@ Working, and reasonably featureful.
 
 **Integration**
 - [x] Windows Explorer "Search with InSearch" context menu (opt-in via ⚙ Settings)
+- [x] Runs without a GPU: DirectX 12 with WARP software fallback on Windows
+      (VMs, Windows Sandbox, RDP), Mesa llvmpipe on Linux
 - [x] CI (Windows + Linux build, release-please)
 
 Enable the Explorer right-click entry from **⚙ Settings → Explorer integration**
@@ -56,7 +60,7 @@ and `all-formats` for all three.
 cargo run -p insearch-gui              # optional: ... -- "C:\path\to\search"
 
 # CLI
-cargo run -p insearch-cli -- <pattern> <root> [more roots...] [--regex] [--gitignore]
+cargo run -p insearch-cli -- <pattern> <root> [more roots...] [--regex] [--no-hidden] [--skip-system-dirs]
 
 # Tests
 cargo test -p insearch-core
