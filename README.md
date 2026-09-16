@@ -67,7 +67,7 @@ cargo test -p insearch-core
 | Crate         | Role                                                                 |
 |---------------|---------------------------------------------------------------------|
 | `insearch-core` | Headless engine: walk (`ignore`), match (`grep-regex`), extract, split |
-| `insearch-gui`  | egui/eframe desktop front-end (glow backend)                        |
+| `insearch-gui`  | egui/eframe desktop front-end (DirectX 12 + WARP on Windows, OpenGL elsewhere) |
 | `insearch-cli`  | Command-line harness (also the fast test surface)                   |
 
 See [`AGENTS.md`](AGENTS.md) for architecture and conventions.

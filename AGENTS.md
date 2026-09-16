@@ -17,7 +17,8 @@ crates/
     split.rs     # UnitSplitter trait; LineSplitter + BlockSplitter (timestamp)
     scan.rs      # ignore::WalkParallel + grep-regex/grep-searcher, streaming
     watch.rs     # notify debouncer + log-tailing offset map
-  insearch-gui/    # eframe/egui front-end (glow backend only)
+  insearch-gui/    # eframe/egui front-end (wgpu/DX12+WARP on Windows, glow elsewhere)
+    renderer.rs  # backend choice, WARP adapter selector, --renderer/--software-gpu
     main.rs      # launch + argv path prefill
     app.rs       # state, debounce, worker plumbing, results table
     palette.rs   # light/dark theming
@@ -54,8 +55,14 @@ plain-text fast path additionally uses `grep-searcher`'s `Searcher`.
 - Conventional Commits (feat/fix/docs/refactor/perf/test/build/ci/chore). SemVer, pre-1.0.
 - Portable code in `insearch-core`; OS-specific code behind `#[cfg(...)]` (the
   Explorer context menu / registry lives in `insearch-gui/src/context_menu.rs`).
-- `eframe` with the **glow** backend only (no wgpu). Don't hard-pin the patch
-  version (`0.36`, not `=0.36.1`).
+- `eframe` renderers: **wgpu on DirectX 12** is the Windows default because
+  wgpu enumerates WARP (Windows' built-in CPU rasterizer), so the GUI opens on
+  GPU-less servers, VMs and Windows Sandbox; a real GPU is preferred when
+  present. **glow** (OpenGL) is the only backend compiled on other platforms
+  and the `--renderer glow` fallback on Windows (`main` relaunches with it once
+  if wgpu fails). Selection lives in `insearch-gui/src/renderer.rs`; don't add
+  renderer logic elsewhere. Don't hard-pin the patch version (`0.36`, not
+  `=0.36.1`).
 - Don't commit build artifacts (`/target` is gitignored).
 
 ## Binary formats (feature-gated)
