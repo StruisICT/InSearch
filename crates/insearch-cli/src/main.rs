@@ -31,6 +31,9 @@ Query:
   --ignore-case       force case-insensitive
   --block             report one result per timestamp-to-timestamp block
   --gitignore         honour .gitignore / hidden-file rules (default: search all)
+  --no-hidden         skip hidden files and folders (dot-prefixed / Hidden attribute)
+  --skip-system-dirs  skip Windows system folders at a drive root (Windows,
+                      Program Files, ProgramData, $Recycle.Bin, ...)
 
 File filters:
   --name <glob>       filename glob, e.g. *.log
@@ -73,6 +76,10 @@ struct Config {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("insearch-cli {}", env!("INSEARCH_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         // Showing usage is a successful outcome (exit 0), not an error.
         eprintln!("{HELP}");
@@ -159,6 +166,8 @@ fn parse(args: &[String]) -> Result<Config, String> {
             "--whole-word" => whole_word = true,
             "--block" => granularity = Granularity::Block,
             "--gitignore" => opts.respect_gitignore = true,
+            "--no-hidden" => opts.include_hidden = false,
+            "--skip-system-dirs" => opts.skip_system_dirs = true,
             "--json" => output = Output::Json,
             "--count" => output = Output::Count,
             "-l" | "--files-with-matches" => output = Output::FilesOnly,
