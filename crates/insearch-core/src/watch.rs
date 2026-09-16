@@ -114,6 +114,9 @@ struct Tailer {
     /// watch mode honours the same filters as the live scan.
     filter: CompiledFilter,
     filter_active: bool,
+    /// Mirror the walker's hidden / system-folder pruning for changed paths.
+    include_hidden: bool,
+    skip_system_dirs: bool,
     generation: u64,
     current_gen: Arc<AtomicU64>,
     tx: Sender<SearchEvent>,
@@ -142,6 +145,8 @@ impl Tailer {
             block,
             filter,
             filter_active,
+            include_hidden: opts.include_hidden,
+            skip_system_dirs: opts.skip_system_dirs,
             generation,
             current_gen,
             tx,
@@ -199,6 +204,12 @@ impl Tailer {
         }
         // Honour the file filter (name / ext / size / date) just like the scan.
         if self.filter_active && !self.filter.accepts_path(path) {
+            return;
+        }
+        if !self.include_hidden && crate::scan::looks_hidden(path) {
+            return;
+        }
+        if self.skip_system_dirs && crate::scan::under_system_dir(path) {
             return;
         }
         match self.block {

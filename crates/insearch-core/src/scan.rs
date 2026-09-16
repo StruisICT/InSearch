@@ -39,6 +39,10 @@ pub struct ScanOptions {
     pub respect_gitignore: bool,
     pub include_hidden: bool,
     pub follow_links: bool,
+    /// Prune well-known Windows system folders that sit at a drive root
+    /// (`C:\Windows`, `C:\Program Files`, …) — see [`is_system_dir`]. A root
+    /// the user picked explicitly is never pruned.
+    pub skip_system_dirs: bool,
     /// Restrict which files are searched (name / extension / size / age).
     pub filter: FileFilter,
     /// Keep only matches whose *in-content* timestamp falls in a range
@@ -52,6 +56,7 @@ impl Default for ScanOptions {
             respect_gitignore: false,
             include_hidden: true,
             follow_links: false,
+            skip_system_dirs: false,
             filter: FileFilter::default(),
             time: None,
         }
@@ -472,6 +477,12 @@ pub fn search(
         .ignore(opts.respect_gitignore)
         .parents(opts.respect_gitignore)
         .follow_links(opts.follow_links);
+    if opts.skip_system_dirs {
+        // Depth 0 is a root the user chose on purpose — never prune that.
+        builder.filter_entry(|e| {
+            e.depth() == 0 || !e.file_type().is_some_and(|t| t.is_dir()) || !is_system_dir(e.path())
+        });
+    }
 
     // Block mode uses our own splitter + matcher; line mode uses grep-searcher.
     let block_splitter = if query.granularity == Granularity::Block {
@@ -817,10 +828,105 @@ pub fn search_collect(roots: &[PathBuf], query: &Query, opts: ScanOptions) -> Ve
     out
 }
 
+/// Folder names that Windows itself owns at the root of a drive. Searching
+/// them is almost never what a user means by "search C:\" and costs minutes.
+const SYSTEM_DIR_NAMES: &[&str] = &[
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "perflogs",
+    "recovery",
+    "system volume information",
+    "$recycle.bin",
+    "$winreagent",
+    "$sysreset",
+    "config.msi",
+    "msocache",
+];
+
+/// Is `path` one of the well-known Windows system folders, sitting directly
+/// under a drive root (`C:\Windows`, `D:\$Recycle.Bin`)? Matching is
+/// case-insensitive on the final component only, and the parent must be a
+/// filesystem root — so a project's own `src\Windows` folder is never pruned.
+pub fn is_system_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let at_root = path.parent().is_some_and(|p| p.parent().is_none());
+    at_root && SYSTEM_DIR_NAMES.contains(&name.to_ascii_lowercase().as_str())
+}
+
+/// Does `path` live inside a folder that [`is_system_dir`] would prune?
+/// (Watch mode has no walker, so it checks changed paths with this.)
+pub fn under_system_dir(path: &Path) -> bool {
+    path.ancestors().skip(1).any(is_system_dir)
+}
+
+/// Does any component of `path` look hidden (dot-prefixed)? Watch-mode stand-in
+/// for the walker's hidden filter; on Windows the file's Hidden attribute is
+/// checked as well.
+pub fn looks_hidden(path: &Path) -> bool {
+    let dotted = path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(n)
+            if n.to_str().is_some_and(|s| s.starts_with('.') && s != "." && s != ".."))
+    });
+    if dotted {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if let Ok(m) = std::fs::metadata(path) {
+            return m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn system_dir_detection_is_root_only_and_case_insensitive() {
+        if cfg!(windows) {
+            assert!(is_system_dir(Path::new("C:\\Windows")));
+            assert!(is_system_dir(Path::new("d:\\program files (X86)")));
+            assert!(is_system_dir(Path::new("C:\\$Recycle.Bin")));
+            assert!(!is_system_dir(Path::new("C:\\Repos\\app\\Windows")));
+            assert!(!is_system_dir(Path::new("C:\\Users")));
+            assert!(under_system_dir(Path::new(
+                "C:\\Windows\\System32\\drivers\\etc\\hosts"
+            )));
+            assert!(!under_system_dir(Path::new("C:\\Repos\\Windows\\x.log")));
+        } else {
+            // The names are Windows-specific but the root rule is portable.
+            assert!(is_system_dir(Path::new("/Windows")));
+            assert!(!is_system_dir(Path::new("/home/me/Windows")));
+        }
+        assert!(looks_hidden(Path::new("/x/.git/config")));
+        assert!(looks_hidden(Path::new("/x/.env")));
+        assert!(!looks_hidden(Path::new("/x/env")));
+    }
+
+    #[test]
+    fn skip_system_dirs_never_prunes_an_explicit_root() {
+        let dir = tmpdir();
+        write(&dir, "a.log", "needle\n");
+        // A root the user picked is searched even when the option is on —
+        // depth-0 entries bypass the filter. (We can't create C:\Windows in a
+        // test, so this guards that the option doesn't break a normal scan.)
+        let opts = ScanOptions {
+            skip_system_dirs: true,
+            ..ScanOptions::default()
+        };
+        let hits = search_collect(std::slice::from_ref(&dir), &Query::literal("needle"), opts);
+        assert_eq!(hits.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn tmpdir() -> PathBuf {
         // A unique-enough temp dir without external crates: PID + address.

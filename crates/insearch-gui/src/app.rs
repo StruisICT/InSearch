@@ -45,6 +45,11 @@ struct Prefs {
     detailed: bool,
     preview: bool,
     roots: Vec<PathBuf>,
+    /// Search defaults (global, persisted): excluded extensions pre-filled into
+    /// every new search, and the two skip toggles on the options row.
+    default_exclude_exts: String,
+    skip_hidden: bool,
+    skip_system_dirs: bool,
 }
 
 impl Default for Prefs {
@@ -54,6 +59,9 @@ impl Default for Prefs {
             detailed: false,
             preview: false,
             roots: Vec::new(),
+            default_exclude_exts: String::new(),
+            skip_hidden: false,
+            skip_system_dirs: false,
         }
     }
 }
@@ -399,6 +407,10 @@ pub struct App {
     granularity: Granularity,
     mode: Mode,
     respect_gitignore: bool,
+    /// Skip hidden files/folders (dot-prefixed, or Windows Hidden attribute).
+    skip_hidden: bool,
+    /// Prune Windows system folders at a drive root (see core `is_system_dir`).
+    skip_system_dirs: bool,
     dark: bool,
 
     // File filters (raw UI text, parsed into a FileFilter on search)
@@ -407,6 +419,9 @@ pub struct App {
     filter_name_regex: bool,
     filter_include_exts: String,
     filter_exclude_exts: String,
+    /// Global default for `filter_exclude_exts`: pre-filled on launch and when
+    /// a saved search carries no exclusion of its own. Edited in Settings.
+    default_exclude_exts: String,
     filter_min_kb: String,
     filter_max_kb: String,
     filter_days: String,
@@ -555,12 +570,15 @@ impl App {
             granularity: Granularity::Line,
             mode: Mode::Live,
             respect_gitignore: false,
+            skip_hidden: prefs.skip_hidden,
+            skip_system_dirs: prefs.skip_system_dirs,
             dark,
             show_filters: false,
             filter_name: String::new(),
             filter_name_regex: false,
             filter_include_exts: String::new(),
-            filter_exclude_exts: String::new(),
+            filter_exclude_exts: prefs.default_exclude_exts.clone(),
+            default_exclude_exts: prefs.default_exclude_exts.clone(),
             filter_min_kb: String::new(),
             filter_max_kb: String::new(),
             filter_days: String::new(),
@@ -623,6 +641,8 @@ impl App {
     fn scan_options(&self) -> ScanOptions {
         ScanOptions {
             respect_gitignore: self.respect_gitignore,
+            include_hidden: !self.skip_hidden,
+            skip_system_dirs: self.skip_system_dirs,
             filter: self.build_filter(),
             time: self.build_time_filter(),
             ..ScanOptions::default()
@@ -642,6 +662,25 @@ impl App {
             before,
             mtime_prefilter: self.ts_mtime_prefilter,
         })
+    }
+
+    /// Is any file/entry-time filter field non-blank? (Drives the "•" on the
+    /// Filters toggle so a pre-filled default exclusion is never invisible.)
+    fn any_filter_set(&self) -> bool {
+        [
+            &self.filter_name,
+            &self.filter_include_exts,
+            &self.filter_exclude_exts,
+            &self.filter_min_kb,
+            &self.filter_max_kb,
+            &self.filter_days,
+            &self.filter_after,
+            &self.filter_before,
+            &self.filter_ts_after,
+            &self.filter_ts_before,
+        ]
+        .iter()
+        .any(|f| !f.trim().is_empty())
     }
 
     fn build_filter(&self) -> FileFilter {
@@ -805,7 +844,14 @@ impl App {
         self.filter_name = s.filter_name.clone();
         self.filter_name_regex = s.filter_name_regex;
         self.filter_include_exts = s.filter_include_exts.clone();
-        self.filter_exclude_exts = s.filter_exclude_exts.clone();
+        // A saved search with its own exclusion list wins; one without falls
+        // back to the global default (so searches saved before a default was
+        // set, or with none, still honour it).
+        self.filter_exclude_exts = if s.filter_exclude_exts.trim().is_empty() {
+            self.default_exclude_exts.clone()
+        } else {
+            s.filter_exclude_exts.clone()
+        };
         self.filter_min_kb = s.filter_min_kb.clone();
         self.filter_max_kb = s.filter_max_kb.clone();
         self.filter_days = s.filter_days.clone();
@@ -1041,6 +1087,26 @@ impl App {
                                     .desired_width(150.0),
                             )
                             .changed();
+                        let is_default =
+                            self.filter_exclude_exts.trim() == self.default_exclude_exts.trim();
+                        if ui
+                            .add_enabled(!is_default, egui::Button::new("Save as default"))
+                            .on_hover_text(
+                                "Use these excluded types for every new search (and for \
+                                 saved searches that have none of their own). Edit or \
+                                 clear the default under Settings.",
+                            )
+                            .on_disabled_hover_text(
+                                if self.default_exclude_exts.trim().is_empty() {
+                                    "No default set — type extensions to exclude, then save them"
+                                } else {
+                                    "These are already the default"
+                                },
+                            )
+                            .clicked()
+                        {
+                            self.default_exclude_exts = self.filter_exclude_exts.trim().to_string();
+                        }
                     });
                     ui.end_row();
 
@@ -1400,8 +1466,38 @@ impl App {
             {
                 self.pending_since = Some(Instant::now());
             }
+            if ui
+                .checkbox(&mut self.skip_hidden, "Skip hidden")
+                .on_hover_text(
+                    "Skip hidden files and folders: dot-prefixed names (.git, .cache) \
+                     and, on Windows, anything with the Hidden attribute. Remembered \
+                     across sessions.",
+                )
+                .changed()
+            {
+                self.pending_since = Some(Instant::now());
+            }
+            if ui
+                .checkbox(&mut self.skip_system_dirs, "Skip system folders")
+                .on_hover_text(
+                    "Skip the Windows system folders at a drive root — Windows, \
+                     Program Files, Program Files (x86), ProgramData, PerfLogs, \
+                     Recovery, $Recycle.Bin, System Volume Information — when \
+                     searching a whole drive. A folder you add explicitly is always \
+                     searched. Remembered across sessions.",
+                )
+                .changed()
+            {
+                self.pending_since = Some(Instant::now());
+            }
             ui.separator();
-            ui.toggle_value(&mut self.show_filters, "⚑ Filters");
+            let filters_label = if self.any_filter_set() {
+                "⚑ Filters •"
+            } else {
+                "⚑ Filters"
+            };
+            ui.toggle_value(&mut self.show_filters, filters_label)
+                .on_hover_text("Name / type / size / date filters (• = some are active)");
         });
 
         // Filters (collapsible).
@@ -1645,6 +1741,33 @@ impl App {
                     ui.add_space(6.0);
                     ui.label(msg);
                 }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.heading("Search defaults");
+                ui.label(
+                    "File types excluded from every new search. Saved searches with \
+                     their own exclusion list override this.",
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Exclude types");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.default_exclude_exts)
+                            .hint_text("e.g. dll, exe, png, jpg, zip")
+                            .desired_width(240.0),
+                    );
+                    if ui
+                        .button("Apply now")
+                        .on_hover_text("Put the default into the current search's Type filter")
+                        .clicked()
+                    {
+                        self.filter_exclude_exts = self.default_exclude_exts.trim().to_string();
+                        self.pending_since = Some(Instant::now());
+                    }
+                });
+                ui.weak("Hidden files and system folders are toggled on the options row.");
             });
         self.show_settings = open;
     }
@@ -2107,6 +2230,9 @@ impl eframe::App for App {
             detailed: self.view == ResultView::Detailed,
             preview: self.show_preview,
             roots: self.roots.clone(),
+            default_exclude_exts: self.default_exclude_exts.clone(),
+            skip_hidden: self.skip_hidden,
+            skip_system_dirs: self.skip_system_dirs,
         };
         eframe::set_value(storage, PREFS_KEY, &prefs);
     }
